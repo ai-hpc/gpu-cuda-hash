@@ -20,6 +20,8 @@
 #define RESET   "\033[0m"
 #define BOLD    "\033[1m"
 
+#define MAX_FOUND 1000
+
 
 __constant__ const unsigned long long total_passwords = 62ULL * 62 * 62 * 62 * 62 * 62;
 __constant__ char d_target_salt[16 + 1];
@@ -47,6 +49,14 @@ __constant__ static const uint32_t K[64] = {
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
+struct FoundPassword {
+    char password[7];
+    uint8_t hash[32];
+    uint8_t salt[8];
+    int hash_idx;
+    uint64_t index;
+};
+    
 class SHA256 {
 private:
     uint32_t state[8];
@@ -209,7 +219,9 @@ __global__ void find_passwords_optimized_multi(
     int num_hashes,
     unsigned long long* global_start_index,
     int batch_size,
-    unsigned long long lowest_unfound_index
+    unsigned long long lowest_unfound_index,
+    FoundPassword* found_passwords,
+    int* num_found
 ) {
     __shared__ uint8_t shared_target[32];
     __shared__ uint8_t shared_salt[8];
@@ -262,9 +274,8 @@ __global__ void find_passwords_optimized_multi(
                         }
                     }
         
-                    // if (match) {
-                    //     printf("FOUND PASSWORD: %.6s\n", password);
-                    // }
+                    if (match) {
+                    }
                 }
         
     }
@@ -343,6 +354,12 @@ int main() {
     printf("- Batch size: %d\n", batch_size);
     printf("- Number of streams: %d\n", NUM_STREAMS);
 
+    FoundPassword* d_found_passwords;
+    int* d_num_found;
+    cudaMalloc(&d_found_passwords, MAX_FOUND * sizeof(FoundPassword));
+    cudaMalloc(&d_num_found, sizeof(int));
+    cudaMemset(d_num_found, 0, sizeof(int));
+
     auto start_time = std::chrono::high_resolution_clock::now();
 
         // Adjust increment to prevent overflow
@@ -360,7 +377,9 @@ int main() {
                     num_hashes,
                     d_global_start_index,
                     batch_size,
-                    lowest_unfound_index + i * numBlocks * blockSize * batch_size
+                    lowest_unfound_index + i * numBlocks * blockSize * batch_size,
+                    d_found_passwords,
+                    d_num_found
                 );
             }
             
@@ -375,6 +394,19 @@ int main() {
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed_seconds = end_time - start_time;
 
+    FoundPassword* h_found_passwords = new FoundPassword[MAX_FOUND];
+    int h_num_found;
+    cudaMemcpy(&h_num_found, d_num_found, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
+    
+    for(int i = 0; i < h_num_found; i++) {
+        const FoundPassword& fp = h_found_passwords[i];
+        for(int j = 0; j < 32; j++) printf("%02x", fp.hash[j]);
+        printf(":");
+        for(int j = 0; j < 8; j++) printf("%02x", fp.salt[j]);
+        printf(":%s\n", fp.password);
+    }
+
     printf("\n\nPerformance metrics:\n");
     printf("Total time: %.2f seconds\n", elapsed_seconds.count());
     printf("Performance: %.2f GH/s\n", total_passwords / elapsed_seconds.count() / 1e9);
@@ -382,6 +414,10 @@ int main() {
     for (int i = 0; i < NUM_STREAMS; i++) {
         cudaStreamDestroy(streams[i]);
     }
+
+    delete[] h_found_passwords;
+    cudaFree(d_found_passwords);
+    cudaFree(d_num_found);
     cudaFree(d_target_salts);
     cudaFree(d_target_hashes);
     cudaFree(d_global_start_index);
