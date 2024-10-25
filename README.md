@@ -18,9 +18,9 @@
 
 ## Core Components
 
-- **Custom SHA-256 Implementation**: Tailored for optimal performance on GPU.
-- **Efficient Password Generation**: Leverages bit manipulation techniques.
-- **Parallel Hash Comparison**: Utilizes vector operations for quick comparisons.
+- **Custom SHA-256 Implementation**: Tailored specifically to handle a 14-byte input consisting of both password and salt, optimizing the hashing process for enhanced security and performance.
+- **Efficient Password Generation**:  Leverages bit manipulation techniques to generate passwords quickly.
+- **Parallel Hash Comparison**: Utilizes vector operations for fast comparisons of hashed values.
 - **Progress Tracking**: Real-time reporting of progress and performance metrics.
 
 ## Input/Output
@@ -36,31 +36,3 @@
 - **Unrolled Loops**: Improves instruction throughput for better performance.
 - **Shared Memory Usage**: Optimizes frequently accessed data storage.
 - **PTX Assembly**: Utilizes optimized vector operations for enhanced speed.
-
-## Getting Started
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/secure-firmware/HashXtreme.git
-   cd HashXtreme
-   ```
-
-2. Build the project:
-   ```bash
-   make
-   ```
-
-3. Prepare your `in.txt` file with `hash:salt` pairs.
-
-4. Run the tool:
-   ```bash
-   ./hashxtreme in.txt
-   ```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
