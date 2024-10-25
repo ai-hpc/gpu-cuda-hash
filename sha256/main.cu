@@ -213,7 +213,6 @@ __device__ bool compareUint8Arrays(const uint8_t* array1, const uint8_t* array2,
 }
 
 
-
 __global__ void find_passwords_optimized_multi(
     const uint8_t* target_salts,
     const uint8_t* target_hashes,
@@ -235,25 +234,37 @@ __global__ void find_passwords_optimized_multi(
 
     // Add at the start of the kernel
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        // eb635a43889975acd972e881ef10b6e09aefa82bf393c7a5608406bb09018dc3:0e8b22dfc589e87a:1e4HTu
-        // 40934773f73fd2f3c62da2928d85b5281c39617025be6863d06596f67916a8b0:0e8b22dfc589e87a:Qj3xrL
-        char test_pass[] = "Qj3xrL";
-        uint8_t test_combined[14];
-        memcpy(test_combined, test_pass, 6);
-        memcpy(test_combined + 6, shared_salt, 8);
+        uint64_t test_indices[] = {0, 1, 61, 62, 3844};
         
-        SHA256 test_sha;
-        uint8_t test_hash[32];
-        test_sha.update(test_combined, 14);
-        test_sha.final(test_hash);
-        
-        printf("\nTest verification:\n");
-        printf("Input: %s with salt: ", test_pass);
-        for(int i = 0; i < 8; i++) printf("%02x", shared_salt[i]);
-        printf("\nComputed hash: ");
-        for(int i = 0; i < 32; i++) printf("%02x", test_hash[i]);
-        printf("\n");
+        printf("\nPassword Generation Pattern Test:\n");
+        for(int t = 0; t < 5; t++) {
+            uint64_t test_idx = test_indices[t];
+            char test_gen_pass[7];  // 6 chars + null terminator
+            
+            generate_password(test_idx, test_gen_pass);
+            
+            uint8_t test_combined[14];
+            memcpy(test_combined, test_gen_pass, 6);
+            memcpy(test_combined + 6, shared_salt, 8);
+            
+            SHA256 debug_sha;
+            uint8_t debug_hash[32];
+            debug_sha.update(test_combined, 14);
+            debug_sha.final(debug_hash);
+            
+            printf("\nIndex: %llu\n", test_idx);
+            printf("Generated password: %.6s\n", test_gen_pass);
+            printf("Combined buffer: ");
+            for(int i = 0; i < 14; i++) printf("%02x ", test_combined[i]);
+            printf("\nHash: ");
+            for(int i = 0; i < 32; i++) printf("%02x", debug_hash[i]);
+            printf("\n");
+        }
     }
+    
+    
+    
+    
 
     __syncthreads();
 
@@ -264,18 +275,15 @@ __global__ void find_passwords_optimized_multi(
         uint64_t idx = base_index + i * gridDim.x * blockDim.x;
         if (idx >= total_passwords) return;
 
-        // Generate password using vectorized operations
-        char password[6];
-        #pragma unroll
-        for (int j = 0; j < 6; j++) {
-            password[j] = 'A' + ((idx >> (j * 6)) & 0x3F);
-        }
 
-        // Combine password and salt using vector operations
+        // Generate password using charset
+        char password[7];  // 6 chars + null terminator
+        generate_password(idx, password);
+        
+        // Combine password and salt
         uint8_t combined[14];
-        asm("mov.b32 %0, %1;" : "=r"(*(uint32_t*)&combined[0]) : "r"(*(uint32_t*)&password[0]));
-        asm("mov.b16 %0, %1;" : "=h"(*(uint16_t*)&combined[4]) : "h"(*(uint16_t*)&password[4]));
-        asm("mov.b64 %0, %1;" : "=l"(*(uint64_t*)&combined[6]) : "l"(*(uint64_t*)&shared_salt[0]));
+        memcpy(combined, password, 6);
+        memcpy(combined + 6, shared_salt, 8);
 
         // Compute hash using optimized SHA256
         SHA256 sha256;
