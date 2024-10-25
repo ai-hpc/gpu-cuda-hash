@@ -223,7 +223,7 @@ __global__ void find_passwords_optimized_multi(
 ) {
     __shared__ uint8_t shared_target[32];
     __shared__ uint8_t shared_salt[8];
-    
+
     // Load target hash and salt into shared memory
     if (threadIdx.x < 32) {
         shared_target[threadIdx.x] = target_hashes[threadIdx.x];
@@ -232,44 +232,28 @@ __global__ void find_passwords_optimized_multi(
         shared_salt[threadIdx.x] = target_salts[threadIdx.x];
     }
 
-    // Add at the start of the kernel
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        uint64_t test_indices[] = {0, 1, 61, 62, 3844};
-        
-        printf("\nPassword Generation Pattern Test:\n");
-        for(int t = 0; t < 5; t++) {
-            uint64_t test_idx = test_indices[t];
-            char test_gen_pass[7];  // 6 chars + null terminator
-            
-            generate_password(test_idx, test_gen_pass);
-            
-            uint8_t test_combined[14];
-            memcpy(test_combined, test_gen_pass, 6);
-            memcpy(test_combined + 6, shared_salt, 8);
-            
-            SHA256 debug_sha;
-            uint8_t debug_hash[32];
-            debug_sha.update(test_combined, 14);
-            debug_sha.final(debug_hash);
-            
-            printf("\nIndex: %llu\n", test_idx);
-            printf("Generated password: %.6s\n", test_gen_pass);
-            printf("Combined buffer: ");
-            for(int i = 0; i < 14; i++) printf("%02x ", test_combined[i]);
-            printf("\nHash: ");
-            for(int i = 0; i < 32; i++) printf("%02x", debug_hash[i]);
-            printf("\n");
-        }
-    }
+   // In kernel:
+   uint64_t base_index = lowest_unfound_index + (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     
-    
+   if (threadIdx.x == 0 && blockIdx.x == 0) {
+       printf("\nSearch progress details:\n");
+       printf("lowest_unfound_index: %llu\n", lowest_unfound_index);
+       printf("blockDim.x: %d\n", blockDim.x);
+       printf("Total passwords to check: %llu\n", total_passwords);
+       
+       // Show first few passwords in sequence
+       for(int i = 0; i < 5; i++) {
+           char debug_pass[7];
+           generate_password(base_index + i, debug_pass);
+           printf("Password at index %llu: %s\n", base_index + i, debug_pass);
+       }
+   }
+
     
     
 
     __syncthreads();
 
-    uint64_t base_index = lowest_unfound_index + blockIdx.x * blockDim.x + threadIdx.x;
-    
     #pragma unroll
     for (int i = 0; i < batch_size; i++) {
         uint64_t idx = base_index + i * gridDim.x * blockDim.x;
@@ -392,23 +376,31 @@ int main() {
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    while (lowest_unfound_index < total_passwords) {
-        printf("\rProcessing index: %llu / %llu (%.2f%%)", 
-               lowest_unfound_index, total_passwords, 
-               (float)lowest_unfound_index * 100 / total_passwords);
-        
-        for (int i = 0; i < NUM_STREAMS; i++) {
-            find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
-                d_target_salts,
-                d_target_hashes,
-                num_hashes,
-                d_global_start_index,
-                batch_size,
-                lowest_unfound_index + i * numBlocks * blockSize * batch_size
-            );
+        // Adjust increment to prevent overflow
+        uint64_t increment = (uint64_t)NUM_STREAMS * numBlocks * blockSize * batch_size;
+        while (lowest_unfound_index < total_passwords) {
+            printf("\rProcessing index: %llu / %llu (%.2f%%)", 
+                   lowest_unfound_index, total_passwords, 
+                   (float)lowest_unfound_index * 100 / total_passwords);
+            
+            // Launch kernels
+            for (int i = 0; i < NUM_STREAMS; i++) {
+                find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
+                    d_target_salts,
+                    d_target_hashes,
+                    num_hashes,
+                    d_global_start_index,
+                    batch_size,
+                    lowest_unfound_index + i * numBlocks * blockSize * batch_size
+                );
+            }
+            
+            if (total_passwords - lowest_unfound_index < increment) {
+                increment = total_passwords - lowest_unfound_index;
+            }
+            lowest_unfound_index += increment;
         }
-        lowest_unfound_index += NUM_STREAMS * numBlocks * blockSize * batch_size;
-    }
+    
 
     cudaDeviceSynchronize();
     auto end_time = std::chrono::high_resolution_clock::now();
