@@ -203,16 +203,6 @@ __device__ void generate_password(long long idx, char *password)
     password[password_length] = '\0'; // Null-terminate the string
 }
 
-__device__ bool compareUint8Arrays(const uint8_t* array1, const uint8_t* array2, size_t length) {
-    for (size_t i = 0; i < length; ++i) {
-        if (array1[i] != array2[i]) {
-            return false; // Arrays differ at this position
-        }
-    }
-    return true; // Arrays are identical
-}
-
-
 __global__ void find_passwords_optimized_multi(
     const uint8_t* target_salts,
     const uint8_t* target_hashes,
@@ -235,23 +225,6 @@ __global__ void find_passwords_optimized_multi(
    // In kernel:
    uint64_t base_index = lowest_unfound_index + (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     
-   if (threadIdx.x == 0 && blockIdx.x == 0) {
-       printf("\nSearch progress details:\n");
-       printf("lowest_unfound_index: %llu\n", lowest_unfound_index);
-       printf("blockDim.x: %d\n", blockDim.x);
-       printf("Total passwords to check: %llu\n", total_passwords);
-       
-       // Show first few passwords in sequence
-       for(int i = 0; i < 5; i++) {
-           char debug_pass[7];
-           generate_password(base_index + i, debug_pass);
-           printf("Password at index %llu: %s\n", base_index + i, debug_pass);
-       }
-   }
-
-    
-    
-
     __syncthreads();
 
     #pragma unroll
@@ -275,19 +248,25 @@ __global__ void find_passwords_optimized_multi(
         sha256.update(combined, 14);
         sha256.final(hash);
 
-        // Compare hash using vector operations
-        bool match = true;
-        #pragma unroll 8
-        for (int k = 0; k < 32; k += 4) {
-            if (*(uint32_t*)&hash[k] != *(uint32_t*)&shared_target[k]) {
-                match = false;
-                break;
-            }
-        }
-
-        if (match) {
-            printf("Found password: %.6s\n", password);
-        }
+                // Compare hash against all target hashes
+                for(int hash_idx = 0; hash_idx < num_hashes; hash_idx++) {
+                    bool match = true;
+                    const uint8_t* current_target = &target_hashes[hash_idx * 32];
+                    const uint8_t* current_salt = &target_salts[hash_idx * 8];
+                    
+                    #pragma unroll 8
+                    for (int k = 0; k < 32; k += 4) {
+                        if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                            match = false;
+                            break;
+                        }
+                    }
+        
+                    // if (match) {
+                    //     printf("FOUND PASSWORD: %.6s\n", password);
+                    // }
+                }
+        
     }
 }
 
@@ -327,9 +306,6 @@ int main() {
     }
 
     printf("\nLoaded %d hash-salt pairs\n", num_hashes);
-    printf("First pair:\n");
-    printf("Hash: %.64s\n", all_hashes[0].hash);
-    printf("Salt: %.16s\n", all_hashes[0].salt);
 
     uint8_t all_target_hashes[MAX_HASHES * 32];
     uint8_t all_target_salts[MAX_HASHES * 8];
@@ -338,13 +314,6 @@ int main() {
         hexToBytes(all_hashes[i].hash, &all_target_hashes[i * 32]);
         hexToBytes(all_hashes[i].salt, &all_target_salts[i * 8]);
     }
-
-    printf("\nBinary conversion of first pair:\n");
-    printf("Hash: ");
-    for(int i = 0; i < 32; i++) printf("%02x", all_target_hashes[i]);
-    printf("\nSalt: ");
-    for(int i = 0; i < 8; i++) printf("%02x", all_target_salts[i]);
-    printf("\n");
 
     uint8_t *d_target_salts;
     uint8_t *d_target_hashes;
