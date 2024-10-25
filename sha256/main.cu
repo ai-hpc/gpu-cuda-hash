@@ -189,7 +189,7 @@ public:
 // Fix the hexToBytes function to maintain byte order
 void hexToBytes(const char* hex, uint8_t* bytes) {
     for (int i = 0; i < strlen(hex)/2; i++) {
-        sscanf(hex + (strlen(hex)/2 - 1 - i)*2, "%2hhx", &bytes[i]);
+        sscanf(hex + i*2, "%2hhx", &bytes[i]);
     }
 }
 
@@ -235,11 +235,12 @@ __global__ void find_passwords_optimized_multi(
 
     // Add at the start of the kernel
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        //eb635a43889975acd972e881ef10b6e09aefa82bf393c7a5608406bb09018dc3:0e8b22dfc589e87a:1e4HTu
-        char test_pass[] = "1e4HTu";
+        // eb635a43889975acd972e881ef10b6e09aefa82bf393c7a5608406bb09018dc3:0e8b22dfc589e87a:1e4HTu
+        // 40934773f73fd2f3c62da2928d85b5281c39617025be6863d06596f67916a8b0:0e8b22dfc589e87a:Qj3xrL
+        char test_pass[] = "Qj3xrL";
         uint8_t test_combined[14];
         memcpy(test_combined, test_pass, 6);
-        memcpy(test_combined + 6, "shared_salt", 8);
+        memcpy(test_combined + 6, shared_salt, 8);
         
         SHA256 test_sha;
         uint8_t test_hash[32];
