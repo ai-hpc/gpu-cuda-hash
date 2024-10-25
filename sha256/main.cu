@@ -247,7 +247,10 @@ __global__ void find_passwords_optimized_multi(
 
         // Generate password using charset
         char password[7];  // 6 chars + null terminator
-        generate_password(idx, password);
+        for (int j = 0; j < 6; j++) {
+            uint32_t char_idx = (idx >> (j * 6)) & 0x3F;
+            password[j] = charset[char_idx];
+        }
         
         // Combine password and salt
         uint8_t combined[14];
