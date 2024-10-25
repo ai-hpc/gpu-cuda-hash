@@ -275,6 +275,14 @@ __global__ void find_passwords_optimized_multi(
                     }
         
                     if (match) {
+                        int found_idx = atomicAdd(num_found, 1);
+                        if (found_idx < MAX_FOUND) {
+                            memcpy(found_passwords[found_idx].password, password, 7);
+                            memcpy(found_passwords[found_idx].hash, hash, 32);
+                            memcpy(found_passwords[found_idx].salt, current_salt, 8);
+                            found_passwords[found_idx].hash_idx = hash_idx;
+                            found_passwords[found_idx].index = idx;
+                        }
                     }
                 }
         
