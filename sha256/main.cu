@@ -276,16 +276,16 @@ __global__ void find_passwords_optimized_multi(
                             break;
                         }
                     }
-        
+                    char char_idx[] = "x";
                     if (match) {
-                        int found_idx = atomicAdd(num_found, 1);
-                        if (found_idx < MAX_FOUND) {
-                            memcpy(found_passwords[found_idx].password, password, 7);
-                            memcpy(found_passwords[found_idx].hash, hash, 32);
-                            memcpy(found_passwords[found_idx].salt, current_salt, 8);
-                            found_passwords[found_idx].hash_idx = hash_idx;
-                            found_passwords[found_idx].index = idx;
-                        }
+                        memcpy(char_idx, "x", 1);
+                        // if (found_idx < MAX_FOUND) {
+                            // memcpy(found_passwords[found_idx].password, password, 7);
+                            // memcpy(found_passwords[found_idx].hash, hash, 32);
+                            // memcpy(found_passwords[found_idx].salt, current_salt, 8);
+                            // found_passwords[found_idx].hash_idx = hash_idx;
+                            // found_passwords[found_idx].index = idx;
+                        // }
                     }
                 }
         
@@ -354,8 +354,8 @@ int main() {
         cudaStreamCreate(&streams[i]);
     }
 
-    int blockSize = 256;
-    int batch_size = 1000;
+    int blockSize = 128;
+    int batch_size = 10000;
     int numBlocks = numSMs * maxBlocksPerSM;
     unsigned long long lowest_unfound_index = 0;
 
@@ -373,32 +373,32 @@ int main() {
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-        // Adjust increment to prevent overflow
-        uint64_t increment = (uint64_t)NUM_STREAMS * numBlocks * blockSize * batch_size;
-        while (lowest_unfound_index < total_passwords) {
-            printf("\rProcessing index: %llu / %llu (%.2f%%)", 
-                   lowest_unfound_index, total_passwords, 
-                   (float)lowest_unfound_index * 100 / total_passwords);
+    // Adjust increment to prevent overflow
+    uint64_t increment = (uint64_t)NUM_STREAMS * numBlocks * blockSize * batch_size;
+    while (lowest_unfound_index < total_passwords) {
+        printf("\rProcessing index: %llu / %llu (%.2f%%)", 
+               lowest_unfound_index, total_passwords, 
+                (float)lowest_unfound_index * 100 / total_passwords);
             
-            // Launch kernels
-            for (int i = 0; i < NUM_STREAMS; i++) {
-                find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
-                    d_target_salts,
-                    d_target_hashes,
-                    num_hashes,
-                    d_global_start_index,
-                    batch_size,
-                    lowest_unfound_index + i * numBlocks * blockSize * batch_size,
-                    d_found_passwords,
-                    d_num_found
-                );
-            }
-            
-            if (total_passwords - lowest_unfound_index < increment) {
-                increment = total_passwords - lowest_unfound_index;
-            }
-            lowest_unfound_index += increment;
+        // Launch kernels
+        for (int i = 0; i < NUM_STREAMS; i++) {
+            find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
+                d_target_salts,
+                d_target_hashes,
+                num_hashes,
+                d_global_start_index,
+                batch_size,
+                lowest_unfound_index + i * numBlocks * blockSize * batch_size,
+                d_found_passwords,
+                d_num_found
+            );
         }
+            
+        if (total_passwords - lowest_unfound_index < increment) {
+            increment = total_passwords - lowest_unfound_index;
+        }
+        lowest_unfound_index += increment;
+    }
     
 
     cudaDeviceSynchronize();
