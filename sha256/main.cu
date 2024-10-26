@@ -203,16 +203,6 @@ void hexToBytes(const char* hex, uint8_t* bytes) {
     }
 }
 
-__device__ void generate_password(long long idx, char *password)
-{
-    for (int i = 0; i < password_length; ++i)
-    {
-        password[i] = charset[idx % charset_size];
-        idx /= charset_size;
-    }
-    password[password_length] = '\0'; // Null-terminate the string
-}
-
 __global__ void find_passwords_optimized_multi(
     const uint8_t* target_salts,
     const uint8_t* target_hashes,
