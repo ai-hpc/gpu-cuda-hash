@@ -337,14 +337,14 @@ int main() {
     cudaMemcpy(d_target_salts, all_target_salts, num_hashes * 8, cudaMemcpyHostToDevice);
     cudaMemcpy(d_target_hashes, all_target_hashes, num_hashes * 32, cudaMemcpyHostToDevice);
 
-    const int NUM_STREAMS = 18;
+    const int NUM_STREAMS = 100;
     cudaStream_t streams[NUM_STREAMS];
     for (int i = 0; i < NUM_STREAMS; i++) {
         cudaStreamCreate(&streams[i]);
     }
 
     int blockSize = 128;
-    int batch_size = 10000;
+    int batch_size = 1;
     int numBlocks = numSMs * maxBlocksPerSM;
     unsigned long long lowest_unfound_index = 0;
 
@@ -364,6 +364,7 @@ int main() {
 
     // Adjust increment to prevent overflow
     uint64_t increment = (uint64_t)NUM_STREAMS * numBlocks * blockSize * batch_size;
+    printf("Increment: %lu\n", increment);
     while (lowest_unfound_index < total_passwords) {
         printf("\rProcessing index: %llu / %llu (%.2f%%)", 
                lowest_unfound_index, total_passwords, 
