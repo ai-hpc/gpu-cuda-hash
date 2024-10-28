@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cuda_runtime.h>
 #include <vector>
+#include <unordered_map>
 
 #ifndef SHA256_CUH
 #define SHA256_CUH
@@ -203,6 +204,26 @@ void hexToBytes(const char* hex, uint8_t* bytes) {
     }
 }
 
+// Host-side hash function
+unsigned int simpleHashHost(const uint8_t* hash, int length) {
+    unsigned int h = 0;
+    for (int i = 0; i < length; i++) {
+        h = h * 31 + hash[i];
+    }
+    return h;
+}
+
+// Device-side hash function
+__device__ unsigned int simpleHashDevice(const uint8_t* hash, int length) {
+    unsigned int h = 0;
+    for (int i = 0; i < length; i++) {
+        h = h * 31 + hash[i];
+    }
+    return h;
+}
+
+
+
 __global__ void find_passwords_optimized_multi(
     const uint8_t* target_salts,
     const uint8_t* target_hashes,
@@ -212,7 +233,10 @@ __global__ void find_passwords_optimized_multi(
     unsigned long long lowest_unfound_index,
     FoundPassword* found_passwords,
     int* num_found,
-    int* d_found_flags
+    int* d_found_flags,
+    const int* d_hash_table_indices,
+    const int* d_hash_table_values,
+    int hash_table_size
 ) {
     __shared__ uint8_t shared_target[32];
     __shared__ uint8_t shared_salt[8];
@@ -254,34 +278,67 @@ __global__ void find_passwords_optimized_multi(
         sha256.update(combined, 14);
         sha256.final(hash);
 
-        // Compare hash against all target hashes
-        for(int hash_idx = 0; hash_idx < num_hashes; hash_idx++) {
+        // // Compare hash against all target hashes
+        // for(int hash_idx = 0; hash_idx < num_hashes; hash_idx++) {
 
-            // if(d_found_flags[hash_idx] == 1) continue;
+        //     // if(d_found_flags[hash_idx] == 1) continue;
 
-            bool match = true;
-            const uint8_t* current_target = &target_hashes[hash_idx * 32];
-            const uint8_t* current_salt = &target_salts[hash_idx * 8];
+        //     bool match = true;
+        //     const uint8_t* current_target = &target_hashes[hash_idx * 32];
+        //     const uint8_t* current_salt = &target_salts[hash_idx * 8];
                     
-            #pragma unroll 8
-            for (int k = 0; k < 32; k += 4) {
-                if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-                    match = false;
-                    break;
+        //     #pragma unroll 8
+        //     for (int k = 0; k < 32; k += 4) {
+        //         if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+        //             match = false;
+        //             break;
+        //         }
+        //     }
+        //     if (match) {
+        //         int found_idx = atomicAdd(num_found, 1);
+        //         if (found_idx < MAX_FOUND) {
+        //             memcpy(found_passwords[found_idx].password, password, 7);
+        //             memcpy(found_passwords[found_idx].hash, hash, 32);
+        //             memcpy(found_passwords[found_idx].salt, current_salt, 8);
+        //             found_passwords[found_idx].hash_idx = hash_idx;
+        //             found_passwords[found_idx].index = idx;
+        //         }
+        //         // atomicExch(&d_found_flags[hash_idx], 1);
+        //     }
+        // }  
+        // Compute hash of the candidate hash using the device-side hash function
+        unsigned int candidate_hash_value = simpleHashDevice(hash, 32);
+
+        // Use the hash table to check for matches
+        int index = d_hash_table_indices[candidate_hash_value % hash_table_size];
+        if (index != -1) {
+            // Check each potential match
+            while (index < hash_table_size && d_hash_table_values[index] != -1) {
+                int target_index = d_hash_table_values[index];
+                const uint8_t* current_target = &target_hashes[target_index * 32];
+
+                bool match = true;
+                #pragma unroll 8
+                for (int k = 0; k < 32; k += 4) {
+                    if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                        match = false;
+                        break;
+                    }
                 }
-            }
-            if (match) {
-                int found_idx = atomicAdd(num_found, 1);
-                if (found_idx < MAX_FOUND) {
-                    memcpy(found_passwords[found_idx].password, password, 7);
-                    memcpy(found_passwords[found_idx].hash, hash, 32);
-                    memcpy(found_passwords[found_idx].salt, current_salt, 8);
-                    found_passwords[found_idx].hash_idx = hash_idx;
-                    found_passwords[found_idx].index = idx;
+                if (match) {
+                    int found_idx = atomicAdd(num_found, 1);
+                    if (found_idx < MAX_FOUND) {
+                        memcpy(found_passwords[found_idx].password, password, 7);
+                        memcpy(found_passwords[found_idx].hash, hash, 32);
+                        memcpy(found_passwords[found_idx].salt, shared_salt, 8);
+                        found_passwords[found_idx].hash_idx = target_index;
+                        found_passwords[found_idx].index = idx;
+                    }
+                    atomicExch(&d_found_flags[target_index], true);
                 }
-                // atomicExch(&d_found_flags[hash_idx], 1);
+                index++;
             }
-        }  
+        }
     }
 }
 
@@ -354,10 +411,46 @@ int main() {
     cudaMalloc(&d_found_flags, num_hashes * sizeof(int));
     cudaMemcpy(d_found_flags, h_found_flags, num_hashes * sizeof(int), cudaMemcpyHostToDevice);
 
-    std::unordered_set<std::string> target_hash_set;
+    // Define the size of the hash table
+    const int HASH_TABLE_SIZE = 1024; // Adjust based on the number of target hashes
+
+    // Host-side hash table
+    std::unordered_map<unsigned int, std::vector<int>> host_hash_table;
+
+    // Populate the hash table
     for (int i = 0; i < num_hashes; i++) {
-        target_hash_set.insert(std::string(all_hashes[i].hash, 64));
+        unsigned int hash_value = simpleHashHost(reinterpret_cast<const uint8_t*>(all_hashes[i].hash), 32);
+        if(i < 100) printf("Hash value: %d : %u\n", i, hash_value);
+        host_hash_table[hash_value % HASH_TABLE_SIZE].push_back(i);
     }
+
+    // Transfer the hash table to device memory
+    // This requires flattening the hash table into arrays
+    std::vector<int> hash_table_indices(HASH_TABLE_SIZE, -1);
+    std::vector<int> hash_table_values;
+
+    // Flatten the hash table
+    for (const auto& entry : host_hash_table) {
+        int index = entry.first;
+        for (int value : entry.second) {
+            hash_table_values.push_back(value);
+        }
+        hash_table_indices[index] = hash_table_values.size() - entry.second.size();
+    }
+    
+
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        if(i < 100) printf("Index %d: %d\n", i, hash_table_indices[i]);
+        if(i < 100) printf("Value %d: %d\n", i, hash_table_values[i]);
+    }
+    
+    // Allocate and copy to device
+    int* d_hash_table_indices;
+    int* d_hash_table_values;
+    cudaMalloc(&d_hash_table_indices, HASH_TABLE_SIZE * sizeof(int));
+    cudaMalloc(&d_hash_table_values, hash_table_values.size() * sizeof(int));
+    cudaMemcpy(d_hash_table_indices, hash_table_indices.data(), HASH_TABLE_SIZE * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_hash_table_values, hash_table_values.data(), hash_table_values.size() * sizeof(int), cudaMemcpyHostToDevice);
 
     int blockSize = 128;
     int batch_size = 1;
@@ -397,7 +490,10 @@ int main() {
                 lowest_unfound_index + i * numBlocks * blockSize * batch_size,
                 d_found_passwords,
                 d_num_found,
-                d_found_flags
+                d_found_flags,
+                d_hash_table_indices,
+                d_hash_table_values,
+                HASH_TABLE_SIZE
             );
         }
             
