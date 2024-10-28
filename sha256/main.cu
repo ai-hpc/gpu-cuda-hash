@@ -211,7 +211,8 @@ __global__ void find_passwords_optimized_multi(
     int batch_size,
     unsigned long long lowest_unfound_index,
     FoundPassword* found_passwords,
-    int* num_found
+    int* num_found,
+    int* d_found_flags
 ) {
     __shared__ uint8_t shared_target[32];
     __shared__ uint8_t shared_salt[8];
@@ -253,31 +254,34 @@ __global__ void find_passwords_optimized_multi(
         sha256.update(combined, 14);
         sha256.final(hash);
 
-                // Compare hash against all target hashes
-                for(int hash_idx = 0; hash_idx < num_hashes; hash_idx++) {
-                    bool match = true;
-                    const uint8_t* current_target = &target_hashes[hash_idx * 32];
-                    const uint8_t* current_salt = &target_salts[hash_idx * 8];
+        // Compare hash against all target hashes
+        for(int hash_idx = 0; hash_idx < num_hashes; hash_idx++) {
+
+            // if(d_found_flags[hash_idx] == 1) continue;
+
+            bool match = true;
+            const uint8_t* current_target = &target_hashes[hash_idx * 32];
+            const uint8_t* current_salt = &target_salts[hash_idx * 8];
                     
-                    #pragma unroll 8
-                    for (int k = 0; k < 32; k += 4) {
-                        if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-                            match = false;
-                            break;
-                        }
-                    }
-                    if (match) {
-                        int found_idx = atomicAdd(num_found, 1);
-                        if (found_idx < MAX_FOUND) {
-                            memcpy(found_passwords[found_idx].password, password, 7);
-                            memcpy(found_passwords[found_idx].hash, hash, 32);
-                            memcpy(found_passwords[found_idx].salt, current_salt, 8);
-                            found_passwords[found_idx].hash_idx = hash_idx;
-                            found_passwords[found_idx].index = idx;
-                        }
-                    }
+            #pragma unroll 8
+            for (int k = 0; k < 32; k += 4) {
+                if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                    match = false;
+                    break;
                 }
-        
+            }
+            if (match) {
+                int found_idx = atomicAdd(num_found, 1);
+                if (found_idx < MAX_FOUND) {
+                    memcpy(found_passwords[found_idx].password, password, 7);
+                    memcpy(found_passwords[found_idx].hash, hash, 32);
+                    memcpy(found_passwords[found_idx].salt, current_salt, 8);
+                    found_passwords[found_idx].hash_idx = hash_idx;
+                    found_passwords[found_idx].index = idx;
+                }
+                // atomicExch(&d_found_flags[hash_idx], 1);
+            }
+        }  
     }
 }
 
@@ -343,6 +347,18 @@ int main() {
         cudaStreamCreate(&streams[i]);
     }
 
+    int* h_found_flags = new int[num_hashes];
+    std::fill(h_found_flags, h_found_flags + num_hashes, 0);
+
+    int* d_found_flags;
+    cudaMalloc(&d_found_flags, num_hashes * sizeof(int));
+    cudaMemcpy(d_found_flags, h_found_flags, num_hashes * sizeof(int), cudaMemcpyHostToDevice);
+
+    std::unordered_set<std::string> target_hash_set;
+    for (int i = 0; i < num_hashes; i++) {
+        target_hash_set.insert(std::string(all_hashes[i].hash, 64));
+    }
+
     int blockSize = 128;
     int batch_size = 1;
     int numBlocks = numSMs * maxBlocksPerSM;
@@ -366,9 +382,9 @@ int main() {
     uint64_t increment = (uint64_t)NUM_STREAMS * numBlocks * blockSize * batch_size;
     printf("Increment: %lu\n", increment);
     while (lowest_unfound_index < total_passwords) {
-        printf("\rProcessing index: %llu / %llu (%.2f%%)", 
-               lowest_unfound_index, total_passwords, 
-                (float)lowest_unfound_index * 100 / total_passwords);
+        // printf("\rProcessing index: %llu / %llu (%.2f%%)", 
+        //        lowest_unfound_index, total_passwords, 
+        //         (float)lowest_unfound_index * 100 / total_passwords);
             
         // Launch kernels
         for (int i = 0; i < NUM_STREAMS; i++) {
@@ -380,7 +396,8 @@ int main() {
                 batch_size,
                 lowest_unfound_index + i * numBlocks * blockSize * batch_size,
                 d_found_passwords,
-                d_num_found
+                d_num_found,
+                d_found_flags
             );
         }
             
