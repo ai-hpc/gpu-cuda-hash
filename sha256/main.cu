@@ -233,7 +233,6 @@ __global__ void find_passwords_optimized_multi(
     unsigned long long lowest_unfound_index,
     FoundPassword* found_passwords,
     int* num_found,
-    int* d_found_flags,
     const int* d_hash_data, // Updated to use d_hash_data
     int hash_table_size
 ) {
@@ -277,34 +276,6 @@ __global__ void find_passwords_optimized_multi(
         sha256.update(combined, 14);
         sha256.final(hash);
 
-        // // Compare hash against all target hashes
-        // for(int hash_idx = 0; hash_idx < num_hashes; hash_idx++) {
-
-        //     // if(d_found_flags[hash_idx] == 1) continue;
-
-        //     bool match = true;
-        //     const uint8_t* current_target = &target_hashes[hash_idx * 32];
-        //     const uint8_t* current_salt = &target_salts[hash_idx * 8];
-                    
-        //     #pragma unroll 8
-        //     for (int k = 0; k < 32; k += 4) {
-        //         if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-        //             match = false;
-        //             break;
-        //         }
-        //     }
-        //     if (match) {
-        //         int found_idx = atomicAdd(num_found, 1);
-        //         if (found_idx < MAX_FOUND) {
-        //             memcpy(found_passwords[found_idx].password, password, 7);
-        //             memcpy(found_passwords[found_idx].hash, hash, 32);
-        //             memcpy(found_passwords[found_idx].salt, current_salt, 8);
-        //             found_passwords[found_idx].hash_idx = hash_idx;
-        //             found_passwords[found_idx].index = idx;
-        //         }
-        //         // atomicExch(&d_found_flags[hash_idx], 1);
-        //     }
-        // }  
         // Compute hash of the candidate hash using the device-side hash function
         // Compute hash of the candidate hash using the device-side hash function
         unsigned int candidate_hash_value = simpleHashDevice(hash, 32);
@@ -312,6 +283,7 @@ __global__ void find_passwords_optimized_multi(
         // Use linear probing to find a match in the hash table
         while (d_hash_data[index] != -1) {
             int target_index = d_hash_data[index];
+
             const uint8_t* current_target = &target_hashes[target_index * 32];
 
             bool match = true;
@@ -323,7 +295,7 @@ __global__ void find_passwords_optimized_multi(
                 }
             }
             if (match) {
-                printf("Found match for hash index %d at index %lu\n", target_index, idx);
+                // printf("Found match for hash index %d at index %lu\n", target_index, idx);
                 int found_idx = atomicAdd(num_found, 1);
                 if (found_idx < MAX_FOUND) {
                     memcpy(found_passwords[found_idx].password, password, 7);
@@ -332,7 +304,6 @@ __global__ void find_passwords_optimized_multi(
                     found_passwords[found_idx].hash_idx = target_index;
                     found_passwords[found_idx].index = idx;
                 }
-                atomicExch(&d_found_flags[target_index], true);
             }
             index = (index + 1) % hash_table_size; // Linear probing
         }
@@ -401,13 +372,6 @@ int main() {
         cudaStreamCreate(&streams[i]);
     }
 
-    int* h_found_flags = new int[num_hashes];
-    std::fill(h_found_flags, h_found_flags + num_hashes, 0);
-
-    int* d_found_flags;
-    cudaMalloc(&d_found_flags, num_hashes * sizeof(int));
-    cudaMemcpy(d_found_flags, h_found_flags, num_hashes * sizeof(int), cudaMemcpyHostToDevice);
-
     // Define the size of the hash table
     const int HASH_TABLE_SIZE = 1024; // Adjust based on the number of target hashes
 
@@ -473,7 +437,6 @@ int main() {
                 lowest_unfound_index + i * numBlocks * blockSize * batch_size,
                 d_found_passwords,
                 d_num_found,
-                d_found_flags,
                 d_hash_data,
                 HASH_TABLE_SIZE
             );
