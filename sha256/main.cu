@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cuda_runtime.h>
 #include <vector>
+#include <unordered_map>
 
 #ifndef SHA256_CUH
 #define SHA256_CUH
@@ -203,15 +204,25 @@ void hexToBytes(const char* hex, uint8_t* bytes) {
     }
 }
 
-__device__ void generate_password(long long idx, char *password)
-{
-    for (int i = 0; i < password_length; ++i)
-    {
-        password[i] = charset[idx % charset_size];
-        idx /= charset_size;
+// Host-side hash function
+unsigned int simpleHashHost(const uint8_t* hash, int length) {
+    unsigned int h = 0;
+    for (int i = 0; i < length; i++) {
+        h = h * 31 + hash[i];
     }
-    password[password_length] = '\0'; // Null-terminate the string
+    return h;
 }
+
+// Device-side hash function
+__device__ unsigned int simpleHashDevice(const uint8_t* hash, int length) {
+    unsigned int h = 0;
+    for (int i = 0; i < length; i++) {
+        h = h * 31 + hash[i];
+    }
+    return h;
+}
+
+
 
 __global__ void find_passwords_optimized_multi(
     const uint8_t* target_salts,
@@ -221,7 +232,9 @@ __global__ void find_passwords_optimized_multi(
     int batch_size,
     unsigned long long lowest_unfound_index,
     FoundPassword* found_passwords,
-    int* num_found
+    int* num_found,
+    const int* d_hash_data, // Updated to use d_hash_data
+    int hash_table_size
 ) {
     __shared__ uint8_t shared_target[32];
     __shared__ uint8_t shared_salt[8];
@@ -263,31 +276,37 @@ __global__ void find_passwords_optimized_multi(
         sha256.update(combined, 14);
         sha256.final(hash);
 
-                // Compare hash against all target hashes
-                for(int hash_idx = 0; hash_idx < num_hashes; hash_idx++) {
-                    bool match = true;
-                    const uint8_t* current_target = &target_hashes[hash_idx * 32];
-                    const uint8_t* current_salt = &target_salts[hash_idx * 8];
-                    
-                    #pragma unroll 8
-                    for (int k = 0; k < 32; k += 4) {
-                        if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-                            match = false;
-                            break;
-                        }
-                    }
-                    if (match) {
-                        int found_idx = atomicAdd(num_found, 1);
-                        if (found_idx < MAX_FOUND) {
-                            memcpy(found_passwords[found_idx].password, password, 7);
-                            memcpy(found_passwords[found_idx].hash, hash, 32);
-                            memcpy(found_passwords[found_idx].salt, current_salt, 8);
-                            found_passwords[found_idx].hash_idx = hash_idx;
-                            found_passwords[found_idx].index = idx;
-                        }
-                    }
+        // Compute hash of the candidate hash using the device-side hash function
+        // Compute hash of the candidate hash using the device-side hash function
+        unsigned int candidate_hash_value = simpleHashDevice(hash, 32);
+        int index = candidate_hash_value % hash_table_size;
+        // Use linear probing to find a match in the hash table
+        while (d_hash_data[index] != -1) {
+            int target_index = d_hash_data[index];
+
+            const uint8_t* current_target = &target_hashes[target_index * 32];
+
+            bool match = true;
+            #pragma unroll 8
+            for (int k = 0; k < 32; k += 4) {
+                if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                    match = false;
+                    break;
                 }
-        
+            }
+            if (match) {
+                // printf("Found match for hash index %d at index %lu\n", target_index, idx);
+                int found_idx = atomicAdd(num_found, 1);
+                if (found_idx < MAX_FOUND) {
+                    memcpy(found_passwords[found_idx].password, password, 7);
+                    memcpy(found_passwords[found_idx].hash, hash, 32);
+                    memcpy(found_passwords[found_idx].salt, shared_salt, 8);
+                    found_passwords[found_idx].hash_idx = target_index;
+                    found_passwords[found_idx].index = idx;
+                }
+            }
+            index = (index + 1) % hash_table_size; // Linear probing
+        }
     }
 }
 
@@ -347,14 +366,41 @@ int main() {
     cudaMemcpy(d_target_salts, all_target_salts, num_hashes * 8, cudaMemcpyHostToDevice);
     cudaMemcpy(d_target_hashes, all_target_hashes, num_hashes * 32, cudaMemcpyHostToDevice);
 
-    const int NUM_STREAMS = 18;
+    const int NUM_STREAMS = 100;
     cudaStream_t streams[NUM_STREAMS];
     for (int i = 0; i < NUM_STREAMS; i++) {
         cudaStreamCreate(&streams[i]);
     }
 
+    // Define the size of the hash table
+    const int HASH_TABLE_SIZE = 1024; // Adjust based on the number of target hashes
+
+    // Initialize hash table
+    std::vector<int> hash_data(HASH_TABLE_SIZE, -1);
+
+    // Populate the hash table using linear probing
+    for (int i = 0; i < num_hashes; i++) {
+        unsigned int hash_value = simpleHashHost(&all_target_hashes[i * 32], 32);
+        int index = hash_value % HASH_TABLE_SIZE;
+
+        // Linear probing to handle collisions
+        while (hash_data[index] != -1) {
+            index = (index + 1) % HASH_TABLE_SIZE;
+        }
+
+        // Store the index of the target hash
+        hash_data[index] = i;
+    }
+
+    // Allocate and initialize hash table on the device
+    int* d_hash_data;
+    cudaMalloc(&d_hash_data, HASH_TABLE_SIZE * sizeof(int));
+    // Copy data from host to device
+    cudaMemcpy(d_hash_data, hash_data.data(), HASH_TABLE_SIZE * sizeof(int), cudaMemcpyHostToDevice);
+
+    
     int blockSize = 128;
-    int batch_size = 10000;
+    int batch_size = 1;
     int numBlocks = numSMs * maxBlocksPerSM;
     unsigned long long lowest_unfound_index = 0;
 
@@ -374,10 +420,11 @@ int main() {
 
     // Adjust increment to prevent overflow
     uint64_t increment = (uint64_t)NUM_STREAMS * numBlocks * blockSize * batch_size;
+    printf("Increment: %lu\n", increment);
     while (lowest_unfound_index < total_passwords) {
-        printf("\rProcessing index: %llu / %llu (%.2f%%)", 
-               lowest_unfound_index, total_passwords, 
-                (float)lowest_unfound_index * 100 / total_passwords);
+        // printf("\rProcessing index: %llu / %llu (%.2f%%)", 
+        //        lowest_unfound_index, total_passwords, 
+        //         (float)lowest_unfound_index * 100 / total_passwords);
             
         // Launch kernels
         for (int i = 0; i < NUM_STREAMS; i++) {
@@ -389,7 +436,9 @@ int main() {
                 batch_size,
                 lowest_unfound_index + i * numBlocks * blockSize * batch_size,
                 d_found_passwords,
-                d_num_found
+                d_num_found,
+                d_hash_data,
+                HASH_TABLE_SIZE
             );
         }
             
@@ -409,13 +458,13 @@ int main() {
     cudaMemcpy(&h_num_found, d_num_found, sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
     
-    for(int i = 0; i < h_num_found; i++) {
-        const FoundPassword& fp = h_found_passwords[i];
-        for(int j = 0; j < 32; j++) printf("%02x", fp.hash[j]);
-        printf(":");
-        for(int j = 0; j < 8; j++) printf("%02x", fp.salt[j]);
-        printf(":%s\n", fp.password);
-    }
+    // for(int i = 0; i < h_num_found; i++) {
+    //     const FoundPassword& fp = h_found_passwords[i];
+    //     for(int j = 0; j < 32; j++) printf("%02x", fp.hash[j]);
+    //     printf(":");
+    //     for(int j = 0; j < 8; j++) printf("%02x", fp.salt[j]);
+    //     printf(":%s\n", fp.password);
+    // }
 
     printf("\n\nPerformance metrics:\n");
     printf("Total time: %.2f seconds\n", elapsed_seconds.count());
