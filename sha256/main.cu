@@ -54,8 +54,6 @@ struct FoundPassword {
     char password[7];
     uint8_t hash[32];
     uint8_t salt[8];
-    int hash_idx;
-    uint64_t index;
 };
     
 class SHA256 {
@@ -301,8 +299,6 @@ __global__ void find_passwords_optimized_multi(
                     memcpy(found_passwords[found_idx].password, password, 7);
                     memcpy(found_passwords[found_idx].hash, hash, 32);
                     memcpy(found_passwords[found_idx].salt, shared_salt, 8);
-                    found_passwords[found_idx].hash_idx = target_index;
-                    found_passwords[found_idx].index = idx;
                 }
             }
             index = (index + 1) % hash_table_size; // Linear probing
@@ -458,13 +454,13 @@ int main() {
     cudaMemcpy(&h_num_found, d_num_found, sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
     
-    // for(int i = 0; i < h_num_found; i++) {
-    //     const FoundPassword& fp = h_found_passwords[i];
-    //     for(int j = 0; j < 32; j++) printf("%02x", fp.hash[j]);
-    //     printf(":");
-    //     for(int j = 0; j < 8; j++) printf("%02x", fp.salt[j]);
-    //     printf(":%s\n", fp.password);
-    // }
+    for(int i = 0; i < h_num_found; i++) {
+        const FoundPassword& fp = h_found_passwords[i];
+        for(int j = 0; j < 32; j++) printf("%02x", fp.hash[j]);
+        printf(":");
+        for(int j = 0; j < 8; j++) printf("%02x", fp.salt[j]);
+        printf(":%s\n", fp.password);
+    }
 
     printf("\n\nPerformance metrics:\n");
     printf("Total time: %.2f seconds\n", elapsed_seconds.count());
