@@ -250,6 +250,9 @@ __global__ void find_passwords_optimized_multi(
     
     __syncthreads();
 
+    // Instantiate SHA256 object oncer per thread
+    SHA256 sha256;
+
     #pragma unroll
     for (int i = 0; i < batch_size; i++) {
         uint64_t idx = base_index + i * gridDim.x * blockDim.x;
@@ -269,7 +272,7 @@ __global__ void find_passwords_optimized_multi(
         memcpy(combined + 6, shared_salt, 8);
 
         // Compute hash using optimized SHA256
-        SHA256 sha256;
+        
         uint8_t hash[32];
         sha256.update(combined, 14);
         sha256.final(hash);
