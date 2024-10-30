@@ -302,10 +302,10 @@ int main() {
     cudaDeviceGetAttribute(&maxBlocksPerSM, cudaDevAttrMaxBlocksPerMultiprocessor, 0);
     cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, 0);
 
-    printf("Device properties:\n");
-    printf("- Number of SMs: %d\n", numSMs);
-    printf("- Max threads per block: %d\n", maxThreadsPerBlock);
-    printf("- Max blocks per SM: %d\n", maxBlocksPerSM);
+    // printf("Device properties:\n");
+    // printf("- Number of SMs: %d\n", numSMs);
+    // printf("- Max threads per block: %d\n", maxThreadsPerBlock);
+    // printf("- Max blocks per SM: %d\n", maxBlocksPerSM);
 
     const int MAX_HASHES = 100;
     struct HashPair {
@@ -330,14 +330,26 @@ int main() {
         num_hashes++;
     }
 
-    printf("\nLoaded %d hash-salt pairs\n", num_hashes);
-
     uint8_t all_target_hashes[MAX_HASHES * 32];
     uint8_t all_target_salts[MAX_HASHES * 8];
     
     for (int i = 0; i < num_hashes; i++) {
         hexToBytes(all_hashes[i].hash, &all_target_hashes[i * 32]);
         hexToBytes(all_hashes[i].salt, &all_target_salts[i * 8]);
+    }
+
+    const int HASH_TABLE_SIZE = 1024; // Adjust based on the number of target hashes
+
+    // Initialize and populate hash table
+    std::vector<int> hash_data(HASH_TABLE_SIZE, -1);
+    for (int i = 0; i < num_hashes; i++) {
+        unsigned int hash_value = simpleHashHost(&all_target_hashes[i * 32], 32);
+        int index = hash_value % HASH_TABLE_SIZE;
+
+        while (hash_data[index] != -1) {
+            index = (index + 1) % HASH_TABLE_SIZE;
+        }
+        hash_data[index] = i;
     }
 
     uint8_t *d_target_salts;
@@ -349,31 +361,6 @@ int main() {
     cudaMemcpy(d_target_salts, all_target_salts, num_hashes * 8, cudaMemcpyHostToDevice);
     cudaMemcpy(d_target_hashes, all_target_hashes, num_hashes * 32, cudaMemcpyHostToDevice);
 
-    const int NUM_STREAMS = 100;
-    cudaStream_t streams[NUM_STREAMS];
-    for (int i = 0; i < NUM_STREAMS; i++) {
-        cudaStreamCreate(&streams[i]);
-    }
-
-    // Define the size of the hash table
-    const int HASH_TABLE_SIZE = 1024; // Adjust based on the number of target hashes
-
-    // Initialize hash table
-    std::vector<int> hash_data(HASH_TABLE_SIZE, -1);
-
-    // Populate the hash table using linear probing
-    for (int i = 0; i < num_hashes; i++) {
-        unsigned int hash_value = simpleHashHost(&all_target_hashes[i * 32], 32);
-        int index = hash_value % HASH_TABLE_SIZE;
-
-        // Linear probing to handle collisions
-        while (hash_data[index] != -1) {
-            index = (index + 1) % HASH_TABLE_SIZE;
-        }
-
-        // Store the index of the target hash
-        hash_data[index] = i;
-    }
 
     // Allocate and initialize hash table on the device
     int* d_hash_data;
@@ -382,12 +369,12 @@ int main() {
     cudaMemcpy(d_hash_data, hash_data.data(), HASH_TABLE_SIZE * sizeof(int), cudaMemcpyHostToDevice);
 
     // Determine the number of threads per block
-    int blockSize = 256; // Choose a block size that is a multiple of the warp size
+    int blockSize = 512; // Choose a block size that is a multiple of the warp size
     int numBlocks = numSMs * maxBlocksPerSM; // Maximize the number of blocks
 
-    printf("\nKernel configuration:\n");
-    printf("- Block size: %d\n", blockSize);
-    printf("- Number of blocks: %d\n", numBlocks);
+    // printf("\nKernel configuration:\n");
+    // printf("- Block size: %d\n", blockSize);
+    // printf("- Number of blocks: %d\n", numBlocks);
 
     FoundPassword* d_found_passwords;
     int* d_num_found;
@@ -395,6 +382,16 @@ int main() {
     cudaMalloc(&d_num_found, sizeof(int));
     cudaMemset(d_num_found, 0, sizeof(int));
 
+    const int NUM_STREAMS = 100;
+    cudaStream_t streams[NUM_STREAMS];
+    for (int i = 0; i < NUM_STREAMS; i++) {
+        cudaStreamCreate(&streams[i]);
+    }
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
     auto start_time = std::chrono::high_resolution_clock::now();
 
         find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
@@ -411,6 +408,11 @@ int main() {
     if (err != cudaSuccess) {
         printf("CUDA Error: %s\n", cudaGetErrorString(err));
     }
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float gpu_time_ms;
+    cudaEventElapsedTime(&gpu_time_ms, start, stop);
     
     cudaDeviceSynchronize();
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -429,7 +431,10 @@ int main() {
         printf(":%s\n", fp.password);
     }
 
-    printf("\n\nPerformance metrics:\n");
+    printf("\nFound %d passwords\n", h_num_found);
+
+    printf(BOLD CYAN "\nPerformance Metrics:\n" RESET);
+    printf("GPU Time: %.2f ms\n", gpu_time_ms);
     printf("Total time: %.2f seconds\n", elapsed_seconds.count());
     printf("Performance: %.2f GH/s\n", total_passwords / elapsed_seconds.count() / 1e9);
 
