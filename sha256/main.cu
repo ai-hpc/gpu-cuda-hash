@@ -28,8 +28,6 @@ __constant__ const unsigned long long total_passwords = 62ULL * 62 * 62 * 62 * 6
 __constant__ char d_target_salt[16 + 1];
 __constant__ uint8_t d_target_hash[32];
 __constant__ char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-const int charset_size = 62; // Length of charset
-const size_t password_length = 6;
 
 // __constant__ array for device-side K values
 __constant__ static const uint32_t K[64] = {
@@ -82,10 +80,11 @@ private:
         
         W[3] = ((uint32_t)data[12] << 24) | ((uint32_t)data[13] << 16) | 0x8000;
 
-        #pragma unroll 11
-        for(int i = 4; i < 15; i++) {
-            W[i] = 0;
-        }
+        // Use 32-bit writes to zero out multiple elements at once
+        *(uint4*)&W[4] = make_uint4(0, 0, 0, 0);  // Zeros W[4] through W[7]
+        *(uint4*)&W[8] = make_uint4(0, 0, 0, 0);  // Zeros W[8] through W[11]
+        *(uint2*)&W[12] = make_uint2(0, 0);       // Zeros W[12] through W[13]
+        W[14] = 0;    
         W[15] = 112;
 
         #pragma unroll 48
@@ -108,33 +107,27 @@ private:
         for(int i = 0; i < 64; i++) {
             // Pre-calculate rotations for better instruction pipelining
             register uint32_t S1, S0;
-            register uint32_t tmp;
 
             // Calculate S1
-            asm("shf.r.wrap.b32 %0, %2, %2, 6;"
-                "shf.r.wrap.b32 %1, %2, %2, 11;"
-                "xor.b32 %0, %0, %1;"
-                "shf.r.wrap.b32 %1, %2, %2, 25;"
-                "xor.b32 %0, %0, %1;"
-                : "=r"(S1), "=r"(tmp)
-                : "r"(e));
-
+            S1 = (e >> 6) | (e << (32 - 6));
+            S1 ^= (e >> 11) | (e << (32 - 11));
+            S1 ^= (e >> 25) | (e << (32 - 25));
+            
             // Calculate S0
-            asm("shf.r.wrap.b32 %0, %2, %2, 2;"
-                "shf.r.wrap.b32 %1, %2, %2, 13;"
-                "xor.b32 %0, %0, %1;"
-                "shf.r.wrap.b32 %1, %2, %2, 22;"
-                "xor.b32 %0, %0, %1;"
-                : "=r"(S0), "=r"(tmp)
-                : "r"(a));
+            S0 = (a >> 2) | (a << (32 - 2));
+            S0 ^= (a >> 13) | (a << (32 - 13));
+            S0 ^= (a >> 22) | (a << (32 - 22));
+            
 
-            // Optimize choice and majority functions
             register uint32_t ch;
-            asm("lop3.b32 %0, %1, %2, %3, 0xCA;" : "=r"(ch) : "r"(e), "r"(f), "r"(g));
-
             register uint32_t maj;
-            asm("lop3.b32 %0, %1, %2, %3, 0xE8;" : "=r"(maj) : "r"(a), "r"(b), "r"(c));
-
+            
+            // Choice function
+            ch = (e & f) ^ (~e & g);
+            
+            // Majority function 
+            maj = (a & b) ^ (a & c) ^ (b & c);
+            
 
             // Combine calculations efficiently
             register uint32_t temp1 = h + S1 + ch + K[i] + W[i];
@@ -232,13 +225,8 @@ __global__ void find_passwords_optimized_multi(
     const int* d_hash_data,
     int hash_table_size
 ) {
-    __shared__ uint8_t shared_target[32];
     __shared__ uint8_t shared_salt[8];
 
-    // Load target hash and salt into shared memory
-    if (threadIdx.x < 32) {
-        shared_target[threadIdx.x] = target_hashes[threadIdx.x];
-    }
     if (threadIdx.x < 8) {
         shared_salt[threadIdx.x] = target_salts[threadIdx.x];
     }
@@ -294,8 +282,9 @@ __global__ void find_passwords_optimized_multi(
                 int found_idx = atomicAdd(num_found, 1);
                 terminate = true;
                 if (found_idx < MAX_FOUND) {
-                    char password[7] = {combined[0], combined[1], combined[2], 
-                                    combined[3], combined[4], combined[5], '\0'};
+                    // Change char to unsigned char
+                    unsigned char password[7] = {combined[0], combined[1], combined[2], 
+                        combined[3], combined[4], combined[5], '\0'};
                     memcpy(found_passwords[found_idx].password, password, 7);
                     memcpy(found_passwords[found_idx].hash, hash, 32);
                     memcpy(found_passwords[found_idx].salt, shared_salt, 8);
@@ -408,37 +397,6 @@ int main() {
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Adjust increment to prevent overflow
-    // uint64_t increment = (uint64_t)NUM_STREAMS * numBlocks * blockSize * batch_size;
-    // printf("Increment: %lu\n", increment);
-    // while (lowest_unfound_index < total_passwords) {
-    //     // printf("\rProcessing index: %llu / %llu (%.2f%%)", 
-    //     //        lowest_unfound_index, total_passwords, 
-    //     //         (float)lowest_unfound_index * 100 / total_passwords);
-            
-    //     // Launch kernels
-    //     for (int i = 0; i < NUM_STREAMS; i++) {
-    //         find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
-    //             d_target_salts,
-    //             d_target_hashes,
-    //             num_hashes,
-    //             d_global_start_index,
-    //             batch_size,
-    //             lowest_unfound_index + i * numBlocks * blockSize * batch_size,
-    //             d_found_passwords,
-    //             d_num_found,
-    //             d_hash_data,
-    //             HASH_TABLE_SIZE
-    //         );
-    //     }
-            
-    //     if (total_passwords - lowest_unfound_index < increment) {
-    //         increment = total_passwords - lowest_unfound_index;
-    //     }
-    //     lowest_unfound_index += increment;
-    // }
-    // for (int i = 0; i < NUM_STREAMS; i++) {
-        // Launch the kernel with the optimized configuration
         find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
             d_target_salts,
             d_target_hashes,
@@ -448,7 +406,6 @@ int main() {
             d_hash_data,
             HASH_TABLE_SIZE
         );
-    // }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
