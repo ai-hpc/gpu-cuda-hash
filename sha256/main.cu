@@ -372,10 +372,6 @@ int main() {
     int blockSize = 512; // Choose a block size that is a multiple of the warp size
     int numBlocks = numSMs * maxBlocksPerSM; // Maximize the number of blocks
 
-    // printf("\nKernel configuration:\n");
-    // printf("- Block size: %d\n", blockSize);
-    // printf("- Number of blocks: %d\n", numBlocks);
-
     FoundPassword* d_found_passwords;
     int* d_num_found;
     cudaMalloc(&d_found_passwords, MAX_FOUND * sizeof(FoundPassword));
