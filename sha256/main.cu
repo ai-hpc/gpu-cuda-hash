@@ -216,33 +216,41 @@ __device__ unsigned int simpleHashDevice(const uint8_t* hash, int length) {
 
 
 
-__global__ void find_passwords_optimized_multi(
-    const uint8_t* target_salts,
-    const uint8_t* target_hashes,
-    int num_hashes,
-    FoundPassword* found_passwords,
-    int* num_found,
-    const int* d_hash_data,
-    int hash_table_size
+// Add at the top with other defines
+#define HASH_TABLE_SIZE 2048
+
+// Structure definition
+struct SaltGroupSoA {
+    uint8_t* salts;
+    uint8_t* hashes;
+    int count;
+};
+
+__global__ void find_passwords_salt_group(
+    const uint8_t* __restrict__ salt,
+    const uint8_t* __restrict__ group_hashes,
+    const int num_hashes_in_group,
+    FoundPassword* __restrict__ found_passwords,
+    int* __restrict__ num_found
 ) {
+    // Shared memory for salt
     __shared__ uint8_t shared_salt[8];
-
+    
+    // Load salt into shared memory
     if (threadIdx.x < 8) {
-        shared_salt[threadIdx.x] = target_salts[threadIdx.x];
+        shared_salt[threadIdx.x] = salt[threadIdx.x];
     }
-
     __syncthreads();
 
-    // Calculate thread position for parallel password generation
-    uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t stride = blockDim.x * gridDim.x;
+    const uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t stride = blockDim.x * gridDim.x;
     
-    // Process multiple passwords per thread using stride
+    SHA256 sha256;
+    uint8_t combined[14];
+    memcpy(combined + 6, shared_salt, 8);
+
     for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += stride) {
         uint64_t idx = password_idx;
-
-        // Combined password and salt array
-        uint8_t combined[14];
         
         #pragma unroll
         for (int i = 0; i < 6; i++) {
@@ -250,29 +258,17 @@ __global__ void find_passwords_optimized_multi(
             idx /= 62;
         }
 
-        memcpy(combined + 6, shared_salt, 8);
-
-        // Instantiate SHA256 object
-        SHA256 sha256;
-
-        // Compute hash
         uint8_t hash[32];
         sha256.computeHash(combined, hash);
 
-        // Hash table lookup using linear probing
-        int index = simpleHashDevice(hash, 32) % hash_table_size;
-        
-        bool terminate = false;
-
-        while (d_hash_data[index] != -1) {
-            const uint8_t* current_target = &target_hashes[d_hash_data[index] * 32];
+        #pragma unroll 4
+        for (int i = 0; i < num_hashes_in_group; i++) {
+            const uint8_t* target_hash = &group_hashes[i * 32];
             bool match = true;
             
-            if (terminate) break;
-            // printf("Thread %d, tid: %llu, index: %d\n", threadIdx.x, tid, index);
             #pragma unroll 8
             for (int k = 0; k < 32; k += 4) {
-                if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                if (*(uint32_t*)&hash[k] != *(uint32_t*)&target_hash[k]) {
                     match = false;
                     break;
                 }
@@ -280,40 +276,51 @@ __global__ void find_passwords_optimized_multi(
 
             if (match) {
                 int found_idx = atomicAdd(num_found, 1);
-                terminate = true;
                 if (found_idx < MAX_FOUND) {
-                    // Change char to unsigned char
-                    unsigned char password[7] = {combined[0], combined[1], combined[2], 
-                        combined[3], combined[4], combined[5], '\0'};
-                    memcpy(found_passwords[found_idx].password, password, 7);
+                    memcpy(found_passwords[found_idx].password, combined, 6);
+                    found_passwords[found_idx].password[6] = '\0';
                     memcpy(found_passwords[found_idx].hash, hash, 32);
                     memcpy(found_passwords[found_idx].salt, shared_salt, 8);
                 }
+                return;
             }
-            index = (index + 1) % hash_table_size;
         }
     }
 }
 
+
+
+
+
+struct SaltGroup {
+    uint8_t salt[8];
+    uint8_t hashes[100][32];  // 100 hashes per salt
+    int count;
+};
+
 int main() {
-    // Get device properties
     int maxThreadsPerBlock, maxBlocksPerSM, numSMs;
     cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0);
     cudaDeviceGetAttribute(&maxBlocksPerSM, cudaDevAttrMaxBlocksPerMultiprocessor, 0);
     cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, 0);
 
-    // printf("Device properties:\n");
-    // printf("- Number of SMs: %d\n", numSMs);
-    // printf("- Max threads per block: %d\n", maxThreadsPerBlock);
-    // printf("- Max blocks per SM: %d\n", maxBlocksPerSM);
+    const int MAX_HASHES = 1000;
+    const int NUM_STREAMS = 10;
+    cudaStream_t streams[NUM_STREAMS];
+    
+    for (int i = 0; i < NUM_STREAMS; i++) {
+        cudaStreamCreate(&streams[i]);
+    }
 
-    const int MAX_HASHES = 100;
-    struct HashPair {
-        char salt[17];
-        char hash[65];
-    };
-    HashPair all_hashes[MAX_HASHES];
-    int num_hashes = 0;
+    // Allocate pinned memory for salt groups
+    SaltGroupSoA* h_salt_groups;
+    cudaHostAlloc(&h_salt_groups, sizeof(SaltGroupSoA) * 10, cudaHostAllocDefault);
+
+    for (int i = 0; i < 10; i++) {
+        cudaHostAlloc(&h_salt_groups[i].salts, 8, cudaHostAllocDefault);
+        cudaHostAlloc(&h_salt_groups[i].hashes, 32 * 100, cudaHostAllocDefault);
+        h_salt_groups[i].count = 0;
+    }
 
     std::ifstream infile("in.txt");
     if (!infile) {
@@ -321,56 +328,35 @@ int main() {
         return 1;
     }
 
+    int num_hashes = 0;
     std::string line;
     while (std::getline(infile, line) && num_hashes < MAX_HASHES) {
-        strncpy(all_hashes[num_hashes].salt, line.substr(65, 16).c_str(), 16);
-        strncpy(all_hashes[num_hashes].hash, line.substr(0, 64).c_str(), 64);
-        all_hashes[num_hashes].salt[16] = '\0';
-        all_hashes[num_hashes].hash[64] = '\0';
+        std::string hash_str = line.substr(0, 64);
+        std::string salt_str = line.substr(65, 16);
+        
+        int group_idx = num_hashes / 100;
+        hexToBytes(salt_str.c_str(), h_salt_groups[group_idx].salts);
+        hexToBytes(hash_str.c_str(), 
+        h_salt_groups[group_idx].hashes + (h_salt_groups[group_idx].count * 32));
+        h_salt_groups[group_idx].count++;
         num_hashes++;
     }
 
-    uint8_t all_target_hashes[MAX_HASHES * 32];
-    uint8_t all_target_salts[MAX_HASHES * 8];
-    
-    for (int i = 0; i < num_hashes; i++) {
-        hexToBytes(all_hashes[i].hash, &all_target_hashes[i * 32]);
-        hexToBytes(all_hashes[i].salt, &all_target_salts[i * 8]);
-    }
-
-    const int HASH_TABLE_SIZE = 1024; // Adjust based on the number of target hashes
-
-    // Initialize and populate hash table
-    std::vector<int> hash_data(HASH_TABLE_SIZE, -1);
-    for (int i = 0; i < num_hashes; i++) {
-        unsigned int hash_value = simpleHashHost(&all_target_hashes[i * 32], 32);
-        int index = hash_value % HASH_TABLE_SIZE;
-
-        while (hash_data[index] != -1) {
-            index = (index + 1) % HASH_TABLE_SIZE;
+    printf("Debug: First entries of each salt group:\n");
+    for (int i = 0; i < 10; i++) {
+        if (h_salt_groups[i].count > 0) {
+            printf("Group %d (count: %d):\n", i, h_salt_groups[i].count);
+            printf("Salt: ");
+            for (int j = 0; j < 8; j++) {
+                printf("%02x", h_salt_groups[i].salts[j]);
+            }
+            printf("\nFirst hash: ");
+            for (int j = 0; j < 32; j++) {
+                printf("%02x", h_salt_groups[i].hashes[j]);
+            }
+            printf("\n");
         }
-        hash_data[index] = i;
     }
-
-    uint8_t *d_target_salts;
-    uint8_t *d_target_hashes;
-
-    cudaMalloc(&d_target_salts, num_hashes * 8);
-    cudaMalloc(&d_target_hashes, num_hashes * 32);
-
-    cudaMemcpy(d_target_salts, all_target_salts, num_hashes * 8, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_target_hashes, all_target_hashes, num_hashes * 32, cudaMemcpyHostToDevice);
-
-
-    // Allocate and initialize hash table on the device
-    int* d_hash_data;
-    cudaMalloc(&d_hash_data, HASH_TABLE_SIZE * sizeof(int));
-    // Copy data from host to device
-    cudaMemcpy(d_hash_data, hash_data.data(), HASH_TABLE_SIZE * sizeof(int), cudaMemcpyHostToDevice);
-
-    // Determine the number of threads per block
-    int blockSize = 512; // Choose a block size that is a multiple of the warp size
-    int numBlocks = numSMs * maxBlocksPerSM; // Maximize the number of blocks
 
     FoundPassword* d_found_passwords;
     int* d_num_found;
@@ -378,11 +364,8 @@ int main() {
     cudaMalloc(&d_num_found, sizeof(int));
     cudaMemset(d_num_found, 0, sizeof(int));
 
-    const int NUM_STREAMS = 100;
-    cudaStream_t streams[NUM_STREAMS];
-    for (int i = 0; i < NUM_STREAMS; i++) {
-        cudaStreamCreate(&streams[i]);
-    }
+    dim3 block(256);
+    dim3 grid(numSMs * maxBlocksPerSM);
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -390,19 +373,29 @@ int main() {
     cudaEventRecord(start);
     auto start_time = std::chrono::high_resolution_clock::now();
 
-        find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
-            d_target_salts,
-            d_target_hashes,
-            num_hashes,
+    for (int group = 0; group < 10; group++) {
+        if (h_salt_groups[group].count == 0) continue;
+
+        uint8_t *d_current_salt, *d_group_hashes;
+        cudaMallocAsync(&d_current_salt, 8, streams[group]);
+        cudaMallocAsync(&d_group_hashes, h_salt_groups[group].count * 32, streams[group]);
+        
+        cudaMemcpyAsync(d_current_salt, h_salt_groups[group].salts, 8, 
+                       cudaMemcpyHostToDevice, streams[group]);
+        cudaMemcpyAsync(d_group_hashes, h_salt_groups[group].hashes,
+                       h_salt_groups[group].count * 32, 
+                       cudaMemcpyHostToDevice, streams[group]);
+
+        find_passwords_salt_group<<<grid, block, 0, streams[group]>>>(
+            d_current_salt,
+            d_group_hashes,
+            h_salt_groups[group].count,
             d_found_passwords,
-            d_num_found,
-            d_hash_data,
-            HASH_TABLE_SIZE
+            d_num_found
         );
 
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+        cudaFreeAsync(d_current_salt, streams[group]);
+        cudaFreeAsync(d_group_hashes, streams[group]);
     }
 
     cudaEventRecord(stop);
@@ -410,7 +403,6 @@ int main() {
     float gpu_time_ms;
     cudaEventElapsedTime(&gpu_time_ms, start, stop);
     
-    cudaDeviceSynchronize();
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed_seconds = end_time - start_time;
 
@@ -418,7 +410,7 @@ int main() {
     int h_num_found;
     cudaMemcpy(&h_num_found, d_num_found, sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
-    
+
     for(int i = 0; i < h_num_found; i++) {
         const FoundPassword& fp = h_found_passwords[i];
         for(int j = 0; j < 32; j++) printf("%02x", fp.hash[j]);
@@ -428,21 +420,23 @@ int main() {
     }
 
     printf("\nFound %d passwords\n", h_num_found);
-
     printf(BOLD CYAN "\nPerformance Metrics:\n" RESET);
     printf("GPU Time: %.2f ms\n", gpu_time_ms);
     printf("Total time: %.2f seconds\n", elapsed_seconds.count());
     printf("Performance: %.2f GH/s\n", total_passwords / elapsed_seconds.count() / 1e9);
 
+    // Cleanup
     for (int i = 0; i < NUM_STREAMS; i++) {
         cudaStreamDestroy(streams[i]);
     }
-
+    for (int i = 0; i < 10; i++) {
+        cudaFreeHost(h_salt_groups[i].salts);
+        cudaFreeHost(h_salt_groups[i].hashes);
+    }
+    cudaFreeHost(h_salt_groups);
     delete[] h_found_passwords;
     cudaFree(d_found_passwords);
     cudaFree(d_num_found);
-    cudaFree(d_target_salts);
-    cudaFree(d_target_hashes);
 
     return 0;
 }
