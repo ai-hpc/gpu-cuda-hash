@@ -260,22 +260,39 @@ __global__ void find_passwords_salt_group(
 
         uint8_t hash[32];
         sha256.computeHash(combined, hash);
-
-        #pragma unroll 4
+        
+        // #pragma unroll 4
         for (int i = 0; i < num_hashes_in_group; i++) {
             const uint8_t* target_hash = &group_hashes[i * 32];
             bool match = true;
             
-            #pragma unroll 8
-            for (int k = 0; k < 32; k += 4) {
-                if (*(uint32_t*)&hash[k] != *(uint32_t*)&target_hash[k]) {
+            // Add before the hash comparison loop
+            #ifdef DEBUG
+            if (tid == 0 && password_idx == 0) {
+                printf("Generated hash: ");
+                for(int j = 0; j < 32; j++) {
+                    printf("%02x", hash[j]);
+                }
+                printf("\n");
+            }
+            #endif
+
+            
+            // #pragma unroll 8
+            for (int k = 0; k < 32; k++) {
+                if (hash[k] != target_hash[k]) {
                     match = false;
+
                     break;
                 }
             }
 
             if (match) {
+                printf("MATCH FOUND! Thread %llu found password: %c%c%c%c%c%c\n", 
+                tid, combined[0], combined[1], combined[2],
+                combined[3], combined[4], combined[5]);
                 int found_idx = atomicAdd(num_found, 1);
+                printf("Found password: %s\n", combined);
                 if (found_idx < MAX_FOUND) {
                     memcpy(found_passwords[found_idx].password, combined, 6);
                     found_passwords[found_idx].password[6] = '\0';
@@ -297,6 +314,10 @@ struct SaltGroup {
     uint8_t hashes[100][32];  // 100 hashes per salt
     int count;
 };
+
+bool isValidHex(const std::string& str) {
+    return str.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+}
 
 int main() {
     int maxThreadsPerBlock, maxBlocksPerSM, numSMs;
@@ -334,6 +355,14 @@ int main() {
         std::string hash_str = line.substr(0, 64);
         std::string salt_str = line.substr(65, 16);
         
+
+        // Add validation checks
+        if (hash_str.length() != 64 || !isValidHex(hash_str) || !isValidHex(salt_str)) {
+            printf("Invalid hash or salt format: %s\n", line.c_str());
+            continue;
+        }
+    
+
         int group_idx = num_hashes / 100;
         hexToBytes(salt_str.c_str(), h_salt_groups[group_idx].salts);
         hexToBytes(hash_str.c_str(), 
@@ -342,21 +371,21 @@ int main() {
         num_hashes++;
     }
 
-    printf("Debug: First entries of each salt group:\n");
-    for (int i = 0; i < 10; i++) {
-        if (h_salt_groups[i].count > 0) {
-            printf("Group %d (count: %d):\n", i, h_salt_groups[i].count);
-            printf("Salt: ");
-            for (int j = 0; j < 8; j++) {
-                printf("%02x", h_salt_groups[i].salts[j]);
-            }
-            printf("\nFirst hash: ");
-            for (int j = 0; j < 32; j++) {
-                printf("%02x", h_salt_groups[i].hashes[j]);
-            }
-            printf("\n");
-        }
-    }
+    // printf("Debug: First entries of each salt group:\n");
+    // for (int i = 0; i < 10; i++) {
+    //     if (h_salt_groups[i].count > 0) {
+    //         printf("Group %d (count: %d):\n", i, h_salt_groups[i].count);
+    //         printf("Salt: ");
+    //         for (int j = 0; j < 8; j++) {
+    //             printf("%02x", h_salt_groups[i].salts[j]);
+    //         }
+    //         printf("\nFirst hash: ");
+    //         for (int j = 0; j < 32; j++) {
+    //             printf("%02x", h_salt_groups[i].hashes[j]);
+    //         }
+    //         printf("\n");
+    //     }
+    // }
 
     FoundPassword* d_found_passwords;
     int* d_num_found;
