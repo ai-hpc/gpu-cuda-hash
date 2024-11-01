@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "CUDA C++: Debug HashXtreme",
+            "type": "cuda-gdb",
+            "request": "launch",
+            "program": "${workspaceFolder}/sha256/main",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/sha256",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "cuda-gdb"
+        }
+    ]
+}
