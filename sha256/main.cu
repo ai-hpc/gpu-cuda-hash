@@ -263,10 +263,20 @@ __global__ void find_passwords_optimized_multi(
             sha256.computeHash(combined, hash);
 
             // Iterate over all hashes for the current salt
-            for (int hash_idx = 0; hash_idx < 100; ++hash_idx) {
-                const uint8_t* current_target = &target_hashes[(salt_idx * 100 + hash_idx) * 32];
-                bool match = true;
+            // Calculate the hash value for the computed hash
+            unsigned int hash_value = simpleHashDevice(hash, 32);
 
+            // Determine the index in the hash table
+            int index = hash_value % hash_table_size;
+            
+            // Use linear probing to resolve collisions
+            while (d_hash_data[index] != -1) {
+                // Get the target hash index from the hash table
+                int target_index = d_hash_data[index];
+                const uint8_t* current_target = &target_hashes[target_index * 32];
+            
+                // Compare the computed hash with the target hash
+                bool match = true;
                 #pragma unroll 8
                 for (int k = 0; k < 32; k += 4) {
                     if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
@@ -274,7 +284,7 @@ __global__ void find_passwords_optimized_multi(
                         break;
                     }
                 }
-
+            
                 if (match) {
                     int found_idx = atomicAdd(num_found, 1);
                     if (found_idx < MAX_FOUND) {
@@ -286,6 +296,9 @@ __global__ void find_passwords_optimized_multi(
                     }
                     break; // Exit loop once a match is found
                 }
+            
+                // Move to the next index in case of a collision
+                index = (index + 1) % hash_table_size;
             }
         }
     }
@@ -335,7 +348,7 @@ int main() {
     }
 
 
-    const int HASH_TABLE_SIZE = 2048; // Adjusted to accommodate 1000 target hashes
+    const int HASH_TABLE_SIZE = 3072; // Adjusted to accommodate 1000 target hashes
 
     // Initialize and populate hash table
     std::vector<int> hash_data(HASH_TABLE_SIZE, -1);
