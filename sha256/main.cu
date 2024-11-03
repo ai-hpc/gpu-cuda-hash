@@ -372,11 +372,23 @@ __global__ void find_passwords_optimized_multi(
             // Combined password and salt array
             uint8_t combined[14];
             
-            #pragma unroll
-            for (int i = 0; i < 6; i++) {
-                combined[i] = charset[idx % 62];
-                idx /= 62;
-            }
+            combined[0] = charset[idx % 62];
+            idx /= 62;
+            
+            combined[1] = charset[idx % 62];
+            idx /= 62;
+            
+            combined[2] = charset[idx % 62];
+            idx /= 62;
+            
+            combined[3] = charset[idx % 62];
+            idx /= 62;
+            
+            combined[4] = charset[idx % 62];
+            idx /= 62;
+            
+            combined[5] = charset[idx % 62];
+            idx /= 62;            
 
             memcpy(combined + 6, shared_salt, 8);
 
@@ -389,7 +401,7 @@ __global__ void find_passwords_optimized_multi(
 
             // Iterate over all hashes for the current salt
             // Calculate the hash value for the computed hash
-            unsigned int hash_value = xxHash32Device(hash, 10);
+            unsigned int hash_value = xxHash32Device(hash, 8);
 
             // Determine the index in the hash table
             int index = hash_value % hash_table_size;
@@ -413,11 +425,25 @@ __global__ void find_passwords_optimized_multi(
                 if (match) {
                     int found_idx = atomicAdd(num_found, 1);
                     if (found_idx < MAX_FOUND) {
-                        unsigned char password[7] = {combined[0], combined[1], combined[2], 
-                            combined[3], combined[4], combined[5], '\0'};
-                        memcpy(found_passwords[found_idx].password, password, 7);
-                        memcpy(found_passwords[found_idx].hash, hash, 32);
-                        memcpy(found_passwords[found_idx].salt, shared_salt, 8);
+                        // Directly assign characters to the password array
+                        found_passwords[found_idx].password[0] = combined[0];
+                        found_passwords[found_idx].password[1] = combined[1];
+                        found_passwords[found_idx].password[2] = combined[2];
+                        found_passwords[found_idx].password[3] = combined[3];
+                        found_passwords[found_idx].password[4] = combined[4];
+                        found_passwords[found_idx].password[5] = combined[5];
+                        found_passwords[found_idx].password[6] = '\0'; // Null-terminate the string
+
+                        // Use a loop to copy the hash and salt, which are larger
+                        #pragma unroll
+                        for (int i = 0; i < 32; ++i) {
+                            found_passwords[found_idx].hash[i] = hash[i];
+                        }
+
+                        #pragma unroll
+                        for (int i = 0; i < 8; ++i) {
+                            found_passwords[found_idx].salt[i] = shared_salt[i];
+                        }
                     }
                     break; // Exit loop once a match is found
                 }
@@ -478,12 +504,10 @@ int main() {
     // Initialize and populate hash table
     std::vector<int> hash_data(HASH_TABLE_SIZE, -1);
 
-    int collisions = 0;
-
     for (int salt_index = 0; salt_index < 10; salt_index++) {
         for (int hash_index = 0; hash_index < 100; hash_index++) {
             // Calculate the hash value for the current hash
-            unsigned int hash_value = xxHash32Host(all_target_hashes[salt_index][hash_index], 10);
+            unsigned int hash_value = xxHash32Host(all_target_hashes[salt_index][hash_index], 8);
 
             // Determine the index in the hash table
             int index = hash_value % HASH_TABLE_SIZE;
@@ -491,16 +515,12 @@ int main() {
             // Use linear probing to resolve collisions
             while (hash_data[index] != -1) {
                 index = (index + 1) % HASH_TABLE_SIZE;
-                collisions++;
             }
 
             // Store the index of the hash in the hash table
             hash_data[index] = salt_index * 100 + hash_index;
         }
     }
-
-    printf("Number of collisions: %d\n", collisions);
-
 
     // Declare device pointers
     uint8_t *d_target_salts;
