@@ -196,25 +196,150 @@ void hexToBytes(const char* hex, uint8_t* bytes) {
     }
 }
 
-// Host-side hash function
-unsigned int simpleHashHost(const uint8_t* hash, int length) {
-    unsigned int h = 0;
-    for (int i = 0; i < length; i++) {
-        h = h * 31 + hash[i];
+unsigned int xxHash32Host(const uint8_t* data, int length, unsigned int seed = 0) {
+    const unsigned int PRIME32_1 = 2654435761U;
+    const unsigned int PRIME32_2 = 2246822519U;
+    const unsigned int PRIME32_3 = 3266489917U;
+    const unsigned int PRIME32_4 = 668265263U;
+    const unsigned int PRIME32_5 = 374761393U;
+
+    unsigned int hash;
+    int index = 0;
+
+    if (length >= 16) {
+        unsigned int v1 = seed + PRIME32_1 + PRIME32_2;
+        unsigned int v2 = seed + PRIME32_2;
+        unsigned int v3 = seed + 0;
+        unsigned int v4 = seed - PRIME32_1;
+
+        const int limit = length - 16;
+        do {
+            v1 += (*(unsigned int*)(data + index)) * PRIME32_2;
+            v1 = (v1 << 13) | (v1 >> (32 - 13));
+            v1 *= PRIME32_1;
+            index += 4;
+
+            v2 += (*(unsigned int*)(data + index)) * PRIME32_2;
+            v2 = (v2 << 13) | (v2 >> (32 - 13));
+            v2 *= PRIME32_1;
+            index += 4;
+
+            v3 += (*(unsigned int*)(data + index)) * PRIME32_2;
+            v3 = (v3 << 13) | (v3 >> (32 - 13));
+            v3 *= PRIME32_1;
+            index += 4;
+
+            v4 += (*(unsigned int*)(data + index)) * PRIME32_2;
+            v4 = (v4 << 13) | (v4 >> (32 - 13));
+            v4 *= PRIME32_1;
+            index += 4;
+        } while (index <= limit);
+
+        hash = ((v1 << 1) | (v1 >> (32 - 1))) +
+               ((v2 << 7) | (v2 >> (32 - 7))) +
+               ((v3 << 12) | (v3 >> (32 - 12))) +
+               ((v4 << 18) | (v4 >> (32 - 18)));
+    } else {
+        hash = seed + PRIME32_5;
     }
-    return h;
+
+    hash += length;
+
+    while (index <= length - 4) {
+        hash += (*(unsigned int*)(data + index)) * PRIME32_3;
+        hash = ((hash << 17) | (hash >> (32 - 17))) * PRIME32_4;
+        index += 4;
+    }
+
+    while (index < length) {
+        hash += data[index] * PRIME32_5;
+        hash = ((hash << 11) | (hash >> (32 - 11))) * PRIME32_1;
+        index++;
+    }
+
+    hash ^= hash >> 15;
+    hash *= PRIME32_2;
+    hash ^= hash >> 13;
+    hash *= PRIME32_3;
+    hash ^= hash >> 16;
+
+    return hash;
 }
 
-// Device-side hash function
-__device__ unsigned int simpleHashDevice(const uint8_t* hash, int length) {
-    unsigned int h = 0;
-    for (int i = 0; i < length; i++) {
-        h = h * 31 + hash[i];
+__device__ unsigned int xxHash32Device(const uint8_t* data, int length, unsigned int seed = 0) {
+    const unsigned int PRIME32_1 = 2654435761U;
+    const unsigned int PRIME32_2 = 2246822519U;
+    const unsigned int PRIME32_3 = 3266489917U;
+    const unsigned int PRIME32_4 = 668265263U;
+    const unsigned int PRIME32_5 = 374761393U;
+
+    unsigned int hash;
+    int index = 0;
+
+    if (length >= 16) {
+        unsigned int v1 = seed + PRIME32_1 + PRIME32_2;
+        unsigned int v2 = seed + PRIME32_2;
+        unsigned int v3 = seed + 0;
+        unsigned int v4 = seed - PRIME32_1;
+
+        const int limit = length - 16;
+        do {
+            unsigned int k1 = *(unsigned int*)(data + index);
+            v1 += k1 * PRIME32_2;
+            v1 = (v1 << 13) | (v1 >> (32 - 13));
+            v1 *= PRIME32_1;
+            index += 4;
+
+            unsigned int k2 = *(unsigned int*)(data + index);
+            v2 += k2 * PRIME32_2;
+            v2 = (v2 << 13) | (v2 >> (32 - 13));
+            v2 *= PRIME32_1;
+            index += 4;
+
+            unsigned int k3 = *(unsigned int*)(data + index);
+            v3 += k3 * PRIME32_2;
+            v3 = (v3 << 13) | (v3 >> (32 - 13));
+            v3 *= PRIME32_1;
+            index += 4;
+
+            unsigned int k4 = *(unsigned int*)(data + index);
+            v4 += k4 * PRIME32_2;
+            v4 = (v4 << 13) | (v4 >> (32 - 13));
+            v4 *= PRIME32_1;
+            index += 4;
+        } while (index <= limit);
+
+        hash = ((v1 << 1) | (v1 >> (32 - 1))) +
+               ((v2 << 7) | (v2 >> (32 - 7))) +
+               ((v3 << 12) | (v3 >> (32 - 12))) +
+               ((v4 << 18) | (v4 >> (32 - 18)));
+    } else {
+        hash = seed + PRIME32_5;
     }
-    return h;
+
+    hash += length;
+
+    while (index <= length - 4) {
+        unsigned int k = *(unsigned int*)(data + index);
+        hash += k * PRIME32_3;
+        hash = ((hash << 17) | (hash >> (32 - 17))) * PRIME32_4;
+        index += 4;
+    }
+
+    while (index < length) {
+        hash += data[index] * PRIME32_5;
+        hash = ((hash << 11) | (hash >> (32 - 11))) * PRIME32_1;
+        index++;
+    }
+
+    hash ^= hash >> 15;
+    hash *= PRIME32_2;
+    hash ^= hash >> 13;
+    hash *= PRIME32_3;
+    hash ^= hash >> 16;
+
+    return hash;
 }
-
-
 
 __global__ void find_passwords_optimized_multi(
     const uint8_t* target_salts,
@@ -264,7 +389,7 @@ __global__ void find_passwords_optimized_multi(
 
             // Iterate over all hashes for the current salt
             // Calculate the hash value for the computed hash
-            unsigned int hash_value = simpleHashDevice(hash, 32);
+            unsigned int hash_value = xxHash32Device(hash, 10);
 
             // Determine the index in the hash table
             int index = hash_value % hash_table_size;
@@ -348,15 +473,17 @@ int main() {
     }
 
 
-    const int HASH_TABLE_SIZE = 3072; // Adjusted to accommodate 1000 target hashes
+    const int HASH_TABLE_SIZE = 9997; // Adjusted to accommodate 1000 target hashes
 
     // Initialize and populate hash table
     std::vector<int> hash_data(HASH_TABLE_SIZE, -1);
 
+    int collisions = 0;
+
     for (int salt_index = 0; salt_index < 10; salt_index++) {
         for (int hash_index = 0; hash_index < 100; hash_index++) {
             // Calculate the hash value for the current hash
-            unsigned int hash_value = simpleHashHost(all_target_hashes[salt_index][hash_index], 32);
+            unsigned int hash_value = xxHash32Host(all_target_hashes[salt_index][hash_index], 10);
 
             // Determine the index in the hash table
             int index = hash_value % HASH_TABLE_SIZE;
@@ -364,12 +491,15 @@ int main() {
             // Use linear probing to resolve collisions
             while (hash_data[index] != -1) {
                 index = (index + 1) % HASH_TABLE_SIZE;
+                collisions++;
             }
 
             // Store the index of the hash in the hash table
             hash_data[index] = salt_index * 100 + hash_index;
         }
     }
+
+    printf("Number of collisions: %d\n", collisions);
 
 
     // Declare device pointers
