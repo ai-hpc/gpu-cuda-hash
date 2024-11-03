@@ -372,23 +372,12 @@ __global__ void find_passwords_optimized_multi(
             // Combined password and salt array
             uint8_t combined[14];
             
-            combined[0] = charset[idx % 62];
-            idx /= 62;
-            
-            combined[1] = charset[idx % 62];
-            idx /= 62;
-            
-            combined[2] = charset[idx % 62];
-            idx /= 62;
-            
-            combined[3] = charset[idx % 62];
-            idx /= 62;
-            
-            combined[4] = charset[idx % 62];
-            idx /= 62;
-            
-            combined[5] = charset[idx % 62];
-            idx /= 62;            
+            combined[0] = charset[idx % 62]; idx /= 62;
+            combined[1] = charset[idx % 62]; idx /= 62;
+            combined[2] = charset[idx % 62]; idx /= 62;
+            combined[3] = charset[idx % 62]; idx /= 62;
+            combined[4] = charset[idx % 62]; idx /= 62;
+            combined[5] = charset[idx % 62]; idx /= 62;         
 
             memcpy(combined + 6, shared_salt, 8);
 
@@ -499,7 +488,7 @@ int main() {
     }
 
 
-    const int HASH_TABLE_SIZE = 9997; // Adjusted to accommodate 1000 target hashes
+    const int HASH_TABLE_SIZE = 19997; // Adjusted to accommodate 1000 target hashes
 
     // Initialize and populate hash table
     std::vector<int> hash_data(HASH_TABLE_SIZE, -1);
