@@ -28,6 +28,7 @@ __constant__ const unsigned long long total_passwords = 62ULL * 62 * 62 * 62 * 6
 __constant__ char d_target_salt[16 + 1];
 __constant__ uint8_t d_target_hash[32];
 __constant__ char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const char host_charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 // __constant__ array for device-side K values
 __constant__ static const uint32_t K[64] = {
@@ -187,6 +188,128 @@ public:
 };
 
 #endif
+
+static const uint32_t cpu_K[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+};
+
+class CPUSHA256 {
+private:
+    uint32_t state[8];
+    uint8_t data[64];
+
+    // Rotate right function
+    static inline uint32_t rotr(uint32_t x, uint32_t n) {
+        return (x >> n) | (x << (32 - n));
+    }
+
+    void transform() {
+        uint32_t W[64];
+
+        // Initial message schedule setup
+        W[0] = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+               ((uint32_t)data[2] << 8) | data[3];
+
+        W[1] = ((uint32_t)data[4] << 24) | ((uint32_t)data[5] << 16) |
+               ((uint32_t)data[6] << 8) | data[7];
+
+        W[2] = ((uint32_t)data[8] << 24) | ((uint32_t)data[9] << 16) |
+               ((uint32_t)data[10] << 8) | data[11];
+
+        W[3] = ((uint32_t)data[12] << 24) | ((uint32_t)data[13] << 16) | 0x8000;
+
+        // Use 32-bit writes to zero out multiple elements at once
+        memset(&W[4], 0, sizeof(uint32_t) * 12);
+        W[15] = 112;
+
+        for (int i = 16; i < 64; i++) {
+            uint32_t s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >> 3);
+            uint32_t s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >> 10);
+            W[i] = W[i - 16] + s0 + W[i - 7] + s1;
+        }
+
+        
+        uint32_t a = state[0];
+        uint32_t b = state[1];
+        uint32_t c = state[2];
+        uint32_t d = state[3];
+        uint32_t e = state[4];
+        uint32_t f = state[5];
+        uint32_t g = state[6];
+        uint32_t h = state[7];
+
+        for (int i = 0; i < 64; i++) {
+            uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            uint32_t ch = (e & f) ^ (~e & g);
+            uint32_t temp1 = h + S1 + ch + cpu_K[i] + W[i];
+            uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            uint32_t temp2 = S0 + maj;
+
+            h = g;
+            g = f;
+            f = e;
+            e = d + temp1;
+            d = c;
+            c = b;
+            b = a;
+            a = temp1 + temp2;
+        }
+
+        state[0] += a;
+        state[1] += b;
+        state[2] += c;
+        state[3] += d;
+        state[4] += e;
+        state[5] += f;
+        state[6] += g;
+        state[7] += h;
+    }
+
+public:
+    CPUSHA256() {
+        state[0] = 0x6a09e667;
+        state[1] = 0xbb67ae85;
+        state[2] = 0x3c6ef372;
+        state[3] = 0xa54ff53a;
+        state[4] = 0x510e527f;
+        state[5] = 0x9b05688c;
+        state[6] = 0x1f83d9ab;
+        state[7] = 0x5be0cd19;
+    }
+
+    void computeHash(const uint8_t* input, uint8_t* hash) {
+        // Update the data array with the input
+        memcpy(data, input, 14);
+
+        // Perform the transformation
+        transform();
+
+        // Finalize the hash computation
+        for (int i = 0; i < 8; i++) {
+            uint32_t s = state[i];
+            hash[i * 4] = s >> 24;
+            hash[i * 4 + 1] = s >> 16;
+            hash[i * 4 + 2] = s >> 8;
+            hash[i * 4 + 3] = s;
+        }
+    }
+};
 
 
 // Fix the hexToBytes function to maintain byte order
@@ -357,7 +480,7 @@ __global__ void find_passwords_optimized_multi(
     uint64_t stride = blockDim.x * gridDim.x;
 
     // Iterate over each salt
-    for (int salt_idx = 0; salt_idx < 10; ++salt_idx) {
+    for (int salt_idx = 0; salt_idx < 7; ++salt_idx) {
         // Load the current salt into shared memory
         if (threadIdx.x < 8) {
             shared_salt[threadIdx.x] = target_salts[salt_idx * 8 + threadIdx.x];
@@ -369,7 +492,7 @@ __global__ void find_passwords_optimized_multi(
         for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += stride) {
             uint64_t idx = password_idx;
 
-            // Combined password and salt array
+            // Combined password and salt arr ay
             uint8_t combined[14];
             
             combined[0] = charset[idx % 62]; idx /= 62;
@@ -444,10 +567,132 @@ __global__ void find_passwords_optimized_multi(
     }
 }
 
+void find_passwords_on_cpu(
+    const uint8_t* target_salts,
+    const uint8_t* target_hashes,
+    int num_hashes,
+    const int* hash_data,
+    int hash_table_size
+) {
+    // Iterate over all possible password indices
+    for (uint64_t password_idx = 0; password_idx < total_passwords; ++password_idx) {
+        uint64_t idx = password_idx;
+        uint8_t password[6];
 
+        // Generate the password from the index
+        password[0] = host_charset[idx % 62]; idx /= 62;
+        password[1] = host_charset[idx % 62]; idx /= 62;
+        password[2] = host_charset[idx % 62]; idx /= 62;
+        password[3] = host_charset[idx % 62]; idx /= 62;
+        password[4] = host_charset[idx % 62]; idx /= 62;
+        password[5] = host_charset[idx % 62];
 
+        // Calculate combined arrays and hashes for the 8th, 9th, and 10th salts
+        for (int salt_idx = 9; salt_idx < 10; ++salt_idx) {
+            uint8_t combined[14];
+            memcpy(combined, password, 6);
+            memcpy(combined + 6, &target_salts[salt_idx * 8], 8);
+
+            // Compute the hash
+            uint8_t hash[32];
+            CPUSHA256 cpusha256;
+            cpusha256.computeHash(combined, hash);
+            if(password_idx%10000000==0)printf("password_idx: %lu\n",password_idx);
+
+            // Calculate the hash value for the computed hash
+            unsigned int hash_value = xxHash32Host(hash, 8);
+
+            // Determine the index in the hash table
+            int index = hash_value % hash_table_size;
+
+            // Use linear probing to resolve collisions
+            while (hash_data[index] != -1) {
+                // Get the target hash index from the hash table
+                int target_index = hash_data[index];
+                const uint8_t* current_target = &target_hashes[target_index * 32];
+
+                // Compare the computed hash with the target hash
+                bool match = true;
+                for (int k = 0; k < 32; k += 4) {
+                    if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                        match = false;
+                        break;
+                    }
+                }
+
+                if (match) {
+                    // Print the found password, salt, and hash
+                    printf("Index: %lu\n", password_idx);
+                    printf("Salt: ");
+                    for (int j = 0; j < 8; j++) {
+                        printf("%02x", target_salts[salt_idx * 8 + j]);
+                    }
+                    printf("\nHash: ");
+                    for (int j = 0; j < 32; j++) {
+                        printf("%02x", hash[j]);
+                    }
+                    printf("\n\n");
+                    break; // Exit loop once a match is found
+                }
+
+                // Move to the next index in case of a collision
+                index = (index + 1) % hash_table_size;
+            }
+        }
+    }
+}
+
+// Helper function to print hash in hexadecimal format
+void print_hash(const uint8_t* hash, size_t length) {
+    for (size_t i = 0; i < length; ++i) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
+    }
+    std::cout << std::dec << std::endl;
+}
+
+// Test function for cpu_sha256
+void test_cpu_sha256() {
+    // Test vectors: input data and expected SHA-256 hash
+    struct TestVector {
+        const char* input;
+        const char* expected_hash;
+    };
+
+    TestVector test_vectors[] = {
+        {"3742376e52410e8b22dfc589e87a", "125b337ce16cd97a15ec5e8e652474adfc87b8f91a33b81f46a9b12e6ee2464b"}
+        // Add more test vectors as needed
+    };
+    const char* test_input = "7B7nRA";
+    const uint8_t test_salt[] = {0x37, 0x42, 0x37, 0x6e, 0x52, 0x41, 0x0e, 0x8b, 0x22, 0xdf, 0xc5, 0x89, 0xe8, 0x7a};
+    
+
+    for (const auto& test_vector : test_vectors) {
+        uint8_t hash[32];
+        CPUSHA256 cpusha256;
+        cpusha256.computeHash(test_salt, hash);
+
+        std::cout << "Input: " << test_vector.input << std::endl;
+        std::cout << "Expected: " << test_vector.expected_hash << std::endl;
+        std::cout << "Computed: ";
+        print_hash(hash, 32);
+
+        // Compare computed hash with expected hash
+        std::stringstream computed_hash_ss;
+        for (size_t i = 0; i < 32; ++i) {
+            computed_hash_ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
+        }
+
+        if (computed_hash_ss.str() == test_vector.expected_hash) {
+            std::cout << "Test passed." << std::endl;
+        } else {
+            std::cout << "Test failed." << std::endl;
+        }
+        std::cout << std::endl;
+    }
+}
 
 int main() {
+    // test_cpu_sha256();
     // Get device properties
     int maxThreadsPerBlock, maxBlocksPerSM, numSMs;
     cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0);
@@ -568,15 +813,15 @@ int main() {
     cudaEventCreate(&stop);
     cudaEventRecord(start);
 
-    find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
-        d_target_salts,       // Device pointer to the array of salts
-        d_target_hashes,      // Device pointer to the array of hashes
-        1000,                 // Total number of hashes (10 salts * 100 hashes each)
-        d_found_passwords,    // Device pointer to store found passwords
-        d_num_found,          // Device pointer to store the number of found passwords
-        d_hash_data,          // Device pointer to the hash table data
-        HASH_TABLE_SIZE       // Size of the hash table
-    );
+    // find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
+    //     d_target_salts,       // Device pointer to the array of salts
+    //     d_target_hashes,      // Device pointer to the array of hashes
+    //     1000,                 // Total number of hashes (10 salts * 100 hashes each)
+    //     d_found_passwords,    // Device pointer to store found passwords
+    //     d_num_found,          // Device pointer to store the number of found passwords
+    //     d_hash_data,          // Device pointer to the hash table data
+    //     HASH_TABLE_SIZE       // Size of the hash table
+    // );
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -589,6 +834,32 @@ int main() {
     cudaEventElapsedTime(&gpu_time_ms, start, stop);
     
     cudaDeviceSynchronize();
+
+    // Create a vector to store found passwords
+    std::vector<FoundPassword> cpu_found_passwords;
+
+    // Process the remaining salts on the CPU
+    find_passwords_on_cpu(
+        reinterpret_cast<const uint8_t*>(all_target_salts),  // Pass as a pointer to uint8_t
+        reinterpret_cast<const uint8_t*>(all_target_hashes), // Pass as a pointer to uint8_t
+        1000,                                                // Total number of hashes (10 salts * 100 hashes each)
+        hash_data.data(),                                    // Pass the hash_data array
+        HASH_TABLE_SIZE                                      // Size of the hash table
+    );
+
+    // for (const auto& fp : cpu_found_passwords) {
+    //     // Print the hash
+    //     for (int j = 0; j < 32; j++) {
+    //         printf("%02x", fp.hash[j]);
+    //     }
+    //     printf(":");
+        
+    //     // Print the salt
+    //     for (int j = 0; j < 8; j++) {
+    //         printf("%02x", fp.salt[j]);
+    //     }
+    //     printf(":%s\n", fp.password);
+    // }
 
     // Allocate memory on the host to store found passwords
     FoundPassword* h_found_passwords = new FoundPassword[MAX_FOUND];
@@ -603,21 +874,21 @@ int main() {
     cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
 
     // Iterate over the found passwords and print their details
-    for (int i = 0; i < h_num_found; i++) {
-        const FoundPassword& fp = h_found_passwords[i];
+    // for (int i = 0; i < h_num_found; i++) {
+    //     const FoundPassword& fp = h_found_passwords[i];
         
-        // Print the hash
-        for (int j = 0; j < 32; j++) {
-            printf("%02x", fp.hash[j]);
-        }
-        printf(":");
+    //     // Print the hash
+    //     for (int j = 0; j < 32; j++) {
+    //         printf("%02x", fp.hash[j]);
+    //     }
+    //     printf(":");
         
-        // Print the salt
-        for (int j = 0; j < 8; j++) {
-            printf("%02x", fp.salt[j]);
-        }
-        printf(":%s\n", fp.password);
-    }
+    //     // Print the salt
+    //     for (int j = 0; j < 8; j++) {
+    //         printf("%02x", fp.salt[j]);
+    //     }
+    //     printf(":%s\n", fp.password);
+    // }
 
     // Print the total number of found passwords
     printf("\nFound %d passwords\n", h_num_found);
