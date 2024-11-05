@@ -379,7 +379,11 @@ __global__ void find_passwords_optimized_multi(
             combined[4] = charset[idx % 62]; idx /= 62;
             combined[5] = charset[idx % 62]; idx /= 62;         
 
-            memcpy(combined + 6, shared_salt, 8);
+            // Use shared memory for salt
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                combined[6 + i] = shared_salt[i];
+            }
 
             // Instantiate SHA256 object
             SHA256 sha256;
