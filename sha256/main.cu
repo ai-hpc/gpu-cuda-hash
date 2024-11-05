@@ -164,7 +164,7 @@ public:
         state[7] = 0x5be0cd19;
     }
 
-    __device__ __forceinline__ void computeHash(const uint8_t* input, uint8_t* hash) {
+    __device__ __forceinline__ void computeHash(const uint8_t* __restrict__ input, uint8_t* __restrict__ hash) {
         // Update the data array with the input
         #pragma unroll
         for (size_t i = 0; i < 14; i++) {
@@ -342,12 +342,12 @@ __device__ __forceinline__ unsigned int xxHash32Device(const uint8_t* data, int 
 }
 
 __global__ void find_passwords_optimized_multi(
-    const uint8_t* target_salts,
-    const uint8_t* target_hashes,
+    const uint8_t* __restrict__ target_salts,
+    const uint8_t* __restrict__ target_hashes,
     int num_hashes,
-    FoundPassword* found_passwords,
-    int* num_found,
-    const int* d_hash_data,
+    FoundPassword* __restrict__ found_passwords,
+    int* __restrict__ num_found,
+    const int* __restrict__ d_hash_data,
     int hash_table_size
 ) {
     __shared__ uint8_t shared_salt[8];
