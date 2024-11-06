@@ -357,7 +357,7 @@ __global__ void find_passwords_optimized_multi(
     uint64_t stride = blockDim.x * gridDim.x;
 
     // Iterate over each salt
-    for (int salt_idx = 0; salt_idx < 3; ++salt_idx) {
+    for (int salt_idx = 0; salt_idx < 7; ++salt_idx) {
         // Load the current salt into shared memory
         if (threadIdx.x < 8) {
             shared_salt[threadIdx.x] = target_salts[salt_idx * 8 + threadIdx.x];
@@ -448,66 +448,21 @@ __global__ void find_passwords_optimized_multi(
     }
 }
 
-#include <cfloat> // Include this header for FLT_MAX
 
-// Function to test different configurations
-void findOptimalConfiguration(
-    const uint8_t* d_target_salts,
-    const uint8_t* d_target_hashes,
-    int* d_hash_data,
-    FoundPassword* d_found_passwords,
-    int* d_num_found
-) {
-    int maxThreadsPerBlock, maxBlocksPerSM, numSMs;
-    cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0);
-    cudaDeviceGetAttribute(&maxBlocksPerSM, cudaDevAttrMaxBlocksPerMultiprocessor, 0);
-    cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, 0);
 
-    int optimalBlockSize = 0;
-    int optimalNumBlocks = 0;
-    float minTime = FLT_MAX;
 
-    for (int blockSize = 32; blockSize <= maxThreadsPerBlock; blockSize *= 2) {
-        int numBlocks = (total_passwords + blockSize - 1) / blockSize;
-        numBlocks = std::min(numBlocks, numSMs * maxBlocksPerSM);
-
-        cudaEvent_t start, stop;
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
-        cudaEventRecord(start);
-
-        find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
-            d_target_salts,
-            d_target_hashes,
-            1000,
-            d_found_passwords,
-            d_num_found,
-            d_hash_data,
-            19997
-        );
-
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-        float gpu_time_ms;
-        cudaEventElapsedTime(&gpu_time_ms, start, stop);
-
-        if (gpu_time_ms < minTime) {
-            minTime = gpu_time_ms;
-            optimalBlockSize = blockSize;
-            optimalNumBlocks = numBlocks;
-        }
-
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-    }
-
-    std::cout << "Optimal Configuration:\n";
-    std::cout << "- Block size: " << optimalBlockSize << "\n";
-    std::cout << "- Number of blocks: " << optimalNumBlocks << "\n";
-    std::cout << "- Execution time: " << minTime << " ms\n";
-}
 
 int main() {
+
+    int numDevices;
+    cudaGetDeviceCount(&numDevices);
+
+    if (numDevices < 1) {
+        std::cerr << "No CUDA-capable devices found." << std::endl;
+        return 1;
+    } else if (numDevices == 1) {
+        std::cout << "Using device: " << 0 << std::endl;
+    }
     // Get device properties
     int maxThreadsPerBlock, maxBlocksPerSM, numSMs;
     cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, 0);
@@ -623,71 +578,70 @@ int main() {
     // Initialize the number of found passwords to zero
     cudaMemset(d_num_found, 0, sizeof(int));
 
-    findOptimalConfiguration(d_target_salts, d_target_hashes, d_hash_data, d_found_passwords, d_num_found);
-    // cudaEvent_t start, stop;
-    // cudaEventCreate(&start);
-    // cudaEventCreate(&stop);
-    // cudaEventRecord(start);
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
 
-    // find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
-    //     d_target_salts,       // Device pointer to the array of salts
-    //     d_target_hashes,      // Device pointer to the array of hashes
-    //     1000,                 // Total number of hashes (10 salts * 100 hashes each)
-    //     d_found_passwords,    // Device pointer to store found passwords
-    //     d_num_found,          // Device pointer to store the number of found passwords
-    //     d_hash_data,          // Device pointer to the hash table data
-    //     HASH_TABLE_SIZE       // Size of the hash table
-    // );
+    find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
+        d_target_salts,       // Device pointer to the array of salts
+        d_target_hashes,      // Device pointer to the array of hashes
+        1000,                 // Total number of hashes (10 salts * 100 hashes each)
+        d_found_passwords,    // Device pointer to store found passwords
+        d_num_found,          // Device pointer to store the number of found passwords
+        d_hash_data,          // Device pointer to the hash table data
+        HASH_TABLE_SIZE       // Size of the hash table
+    );
 
-    // cudaError_t err = cudaGetLastError();
-    // if (err != cudaSuccess) {
-    //     printf("CUDA Error: %s\n", cudaGetErrorString(err));
-    // }
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
 
-    // cudaEventRecord(stop);
-    // cudaEventSynchronize(stop);
-    // float gpu_time_ms;
-    // cudaEventElapsedTime(&gpu_time_ms, start, stop);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float gpu_time_ms;
+    cudaEventElapsedTime(&gpu_time_ms, start, stop);
     
-    // cudaDeviceSynchronize();
+    cudaDeviceSynchronize();
 
-    // // Allocate memory on the host to store found passwords
-    // FoundPassword* h_found_passwords = new FoundPassword[MAX_FOUND];
+    // Allocate memory on the host to store found passwords
+    FoundPassword* h_found_passwords = new FoundPassword[MAX_FOUND];
 
-    // // Variable to store the number of found passwords
-    // int h_num_found;
+    // Variable to store the number of found passwords
+    int h_num_found;
 
-    // // Copy the number of found passwords from device to host
-    // cudaMemcpy(&h_num_found, d_num_found, sizeof(int), cudaMemcpyDeviceToHost);
+    // Copy the number of found passwords from device to host
+    cudaMemcpy(&h_num_found, d_num_found, sizeof(int), cudaMemcpyDeviceToHost);
 
-    // // Copy the found passwords from device to host
-    // cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
+    // Copy the found passwords from device to host
+    cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
 
-    // // Iterate over the found passwords and print their details
-    // for (int i = 0; i < h_num_found; i++) {
-    //     const FoundPassword& fp = h_found_passwords[i];
+    // Iterate over the found passwords and print their details
+    for (int i = 0; i < h_num_found; i++) {
+        const FoundPassword& fp = h_found_passwords[i];
         
-    //     // Print the hash
-    //     for (int j = 0; j < 32; j++) {
-    //         printf("%02x", fp.hash[j]);
-    //     }
-    //     printf(":");
+        // Print the hash
+        for (int j = 0; j < 32; j++) {
+            printf("%02x", fp.hash[j]);
+        }
+        printf(":");
         
-    //     // Print the salt
-    //     for (int j = 0; j < 8; j++) {
-    //         printf("%02x", fp.salt[j]);
-    //     }
-    //     printf(":%s\n", fp.password);
-    // }
+        // Print the salt
+        for (int j = 0; j < 8; j++) {
+            printf("%02x", fp.salt[j]);
+        }
+        printf(":%s\n", fp.password);
+    }
 
-    // // Print the total number of found passwords
-    // printf("\nFound %d passwords\n", h_num_found);
+    // Print the total number of found passwords
+    printf("\nFound %d passwords\n", h_num_found);
 
 
 
-    // printf(BOLD CYAN "\nPerformance Metrics:\n" RESET);
-    // printf("GPU Time: %.2f ms\n", gpu_time_ms);
-    // // printf("Performance: %.2f GH/s\n", total_passwords / elapsed_seconds.count() / 1e9);
+    printf(BOLD CYAN "\nPerformance Metrics:\n" RESET);
+    printf("GPU Time: %.2f ms\n", gpu_time_ms);
+    // printf("Performance: %.2f GH/s\n", total_passwords / elapsed_seconds.count() / 1e9);
 
 
     cudaFree(d_found_passwords);
