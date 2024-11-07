@@ -348,63 +348,65 @@ __global__ void find_passwords_optimized_multi(
     FoundPassword* __restrict__ found_passwords,
     int* __restrict__ num_found,
     const int* __restrict__ d_hash_data,
-    int hash_table_size
+    int hash_table_size,
+    int num_salts // New parameter to specify the number of salts
 ) {
-    __shared__ uint8_t shared_salt[8];
+    __shared__ uint8_t shared_salts[10][8]; // Adjust size based on the number of salts
 
     // Calculate thread position for parallel password generation
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t stride = blockDim.x * gridDim.x;
 
-    // Iterate over each salt
-    for (int salt_idx = 0; salt_idx < num_hashes / 100; ++salt_idx) {
-        // Load the current salt into shared memory
-        if (threadIdx.x < 8) {
-            shared_salt[threadIdx.x] = target_salts[salt_idx * 8 + threadIdx.x];
-        }
+    // Load salts into shared memory
+    if (threadIdx.x < num_salts * 8) {
+        int salt_idx = threadIdx.x / 8;
+        int byte_idx = threadIdx.x % 8;
+        shared_salts[salt_idx][byte_idx] = target_salts[salt_idx * 8 + byte_idx];
+    }
 
-        __syncthreads();
+    __syncthreads();
 
-        // Process multiple passwords per thread using stride
-        for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += stride) {
-            uint64_t idx = password_idx;
+    // Process multiple passwords per thread using stride
+    for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += stride) {
+        uint64_t idx = password_idx;
 
-            // Combined password and salt array
-            uint8_t combined[14];
-            
-            combined[0] = charset[idx % 62]; idx /= 62;
-            combined[1] = charset[idx % 62]; idx /= 62;
-            combined[2] = charset[idx % 62]; idx /= 62;
-            combined[3] = charset[idx % 62]; idx /= 62;
-            combined[4] = charset[idx % 62]; idx /= 62;
-            combined[5] = charset[idx % 62]; idx /= 62;         
+        // Combined password and salt array
+        uint8_t combined[14];
 
+        combined[0] = charset[idx % 62]; idx /= 62;
+        combined[1] = charset[idx % 62]; idx /= 62;
+        combined[2] = charset[idx % 62]; idx /= 62;
+        combined[3] = charset[idx % 62]; idx /= 62;
+        combined[4] = charset[idx % 62]; idx /= 62;
+        combined[5] = charset[idx % 62]; idx /= 62;
+
+        // Instantiate SHA256 object
+        SHA256 sha256;
+
+        // Compute hashes for all salts
+        for (int salt_idx = 0; salt_idx < num_salts; ++salt_idx) {
             // Use shared memory for salt
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                combined[6 + i] = shared_salt[i];
+                combined[6 + i] = shared_salts[salt_idx][i];
             }
-
-            // Instantiate SHA256 object
-            SHA256 sha256;
 
             // Compute hash
             uint8_t hash[32];
             sha256.computeHash(combined, hash);
 
-            // Iterate over all hashes for the current salt
             // Calculate the hash value for the computed hash
             unsigned int hash_value = xxHash32Device(hash, 8);
 
             // Determine the index in the hash table
             int index = hash_value % hash_table_size;
-            
+
             // Use linear probing to resolve collisions
             while (d_hash_data[index] != -1) {
                 // Get the target hash index from the hash table
                 int target_index = d_hash_data[index];
                 const uint8_t* current_target = &target_hashes[target_index * 32];
-            
+
                 // Compare the computed hash with the target hash
                 bool match = true;
                 #pragma unroll 8
@@ -414,7 +416,7 @@ __global__ void find_passwords_optimized_multi(
                         break;
                     }
                 }
-            
+
                 if (match) {
                     int found_idx = atomicAdd(num_found, 1);
                     if (found_idx < MAX_FOUND) {
@@ -435,12 +437,12 @@ __global__ void find_passwords_optimized_multi(
 
                         #pragma unroll
                         for (int i = 0; i < 8; ++i) {
-                            found_passwords[found_idx].salt[i] = shared_salt[i];
+                            found_passwords[found_idx].salt[i] = shared_salts[salt_idx][i];
                         }
                     }
                     break; // Exit loop once a match is found
                 }
-            
+
                 // Move to the next index in case of a collision
                 index = (index + 1) % hash_table_size;
             }
@@ -592,7 +594,8 @@ int main() {
             d_found_passwords[device],
             d_num_found[device],
             d_hash_data[device],
-            HASH_TABLE_SIZE
+            HASH_TABLE_SIZE,
+            10
         );
         
         // Check for errors
