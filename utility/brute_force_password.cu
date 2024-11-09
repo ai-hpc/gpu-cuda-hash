@@ -7,6 +7,7 @@ __global__ void generatePasswordsBatch(char *charset, int charsetSize, int passw
 
     if (idx < startIdx + batchSize) {
         unsigned long long tempIdx = idx;
+        // #pragma unroll
         for (int i = 0; i < passwordLength; ++i) {
             results[(idx - startIdx) * passwordLength + i] = charset[tempIdx % charsetSize];
             tempIdx /= charsetSize;
@@ -19,7 +20,7 @@ int main() {
     const int passwordLength = 6;
     const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     const unsigned long long totalPasswords = static_cast<unsigned long long>(pow(charsetSize, passwordLength));
-    const unsigned long long batchSize = 1000000; // Example batch size
+    const unsigned long long batchSize = 1000000000000; // Example batch size
 
     char *d_charset, *d_results;
     cudaMalloc(&d_charset, charsetSize * sizeof(char));
