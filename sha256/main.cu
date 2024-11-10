@@ -70,17 +70,16 @@ __device__ __forceinline__ uint32_t rotr(uint32_t x, uint32_t n) {
 }
 
 // SHA-256 hash function
-__device__ void sha256(const uint8_t* __restrict__ input, uint8_t* __restrict__ hash) {
-    uint32_t state[8] = {
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-    };
-
-    uint8_t data[64] = {0};
-    #pragma unroll
-    for (size_t i = 0; i < 14; i++) {
-        data[i] = input[i];
-    }
+__device__ void sha256(const uint8_t* __restrict__ data, uint8_t* __restrict__ hash) {
+    // Initial hash values
+    uint32_t a = 0x6a09e667;
+    uint32_t b = 0xbb67ae85;
+    uint32_t c = 0x3c6ef372;
+    uint32_t d = 0xa54ff53a;
+    uint32_t e = 0x510e527f;
+    uint32_t f = 0x9b05688c;
+    uint32_t g = 0x1f83d9ab;
+    uint32_t h = 0x5be0cd19;
 
     uint32_t W[64];
     W[0] = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
@@ -90,9 +89,7 @@ __device__ void sha256(const uint8_t* __restrict__ input, uint8_t* __restrict__ 
 
     *(uint4*)&W[4] = make_uint4(0, 0, 0, 0);
     *(uint4*)&W[8] = make_uint4(0, 0, 0, 0);
-    *(uint2*)&W[12] = make_uint2(0, 0);
-    W[14] = 0;
-    W[15] = 112;
+    *(uint4*)&W[12] = make_uint4(0, 0, 0, 112);
 
     #pragma unroll 48
     for (int i = 16; i < 64; i++) {
@@ -100,15 +97,6 @@ __device__ void sha256(const uint8_t* __restrict__ input, uint8_t* __restrict__ 
         uint32_t s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >> 10);
         W[i] = W[i - 16] + s0 + W[i - 7] + s1;
     }
-
-    uint32_t a = state[0];
-    uint32_t b = state[1];
-    uint32_t c = state[2];
-    uint32_t d = state[3];
-    uint32_t e = state[4];
-    uint32_t f = state[5];
-    uint32_t g = state[6];
-    uint32_t h = state[7];
 
     #pragma unroll 64
     for (int i = 0; i < 64; i++) {
@@ -129,24 +117,59 @@ __device__ void sha256(const uint8_t* __restrict__ input, uint8_t* __restrict__ 
         a = temp1 + temp2;
     }
 
-    state[0] += a;
-    state[1] += b;
-    state[2] += c;
-    state[3] += d;
-    state[4] += e;
-    state[5] += f;
-    state[6] += g;
-    state[7] += h;
+    // Add the compressed chunk to the current hash value
+    a += 0x6a09e667;
+    b += 0xbb67ae85;
+    c += 0x3c6ef372;
+    d += 0xa54ff53a;
+    e += 0x510e527f;
+    f += 0x9b05688c;
+    g += 0x1f83d9ab;
+    h += 0x5be0cd19;
 
-    #pragma unroll 8
-    for (int i = 0; i < 8; i++) {
-        uint32_t s = state[i];
-        hash[i * 4] = s >> 24;
-        hash[i * 4 + 1] = s >> 16;
-        hash[i * 4 + 2] = s >> 8;
-        hash[i * 4 + 3] = s;
-    }
+    // Produce the final hash value (big-endian) without using a loop
+    hash[0] = a >> 24;
+    hash[1] = a >> 16;
+    hash[2] = a >> 8;
+    hash[3] = a;
+
+    hash[4] = b >> 24;
+    hash[5] = b >> 16;
+    hash[6] = b >> 8;
+    hash[7] = b;
+
+    hash[8] = c >> 24;
+    hash[9] = c >> 16;
+    hash[10] = c >> 8;
+    hash[11] = c;
+
+    hash[12] = d >> 24;
+    hash[13] = d >> 16;
+    hash[14] = d >> 8;
+    hash[15] = d;
+
+    hash[16] = e >> 24;
+    hash[17] = e >> 16;
+    hash[18] = e >> 8;
+    hash[19] = e;
+
+    hash[20] = f >> 24;
+    hash[21] = f >> 16;
+    hash[22] = f >> 8;
+    hash[23] = f;
+
+    hash[24] = g >> 24;
+    hash[25] = g >> 16;
+    hash[26] = g >> 8;
+    hash[27] = g;
+
+    hash[28] = h >> 24;
+    hash[29] = h >> 16;
+    hash[30] = h >> 8;
+    hash[31] = h;
+
 }
+
 
 #endif
 
@@ -313,8 +336,7 @@ __global__ void find_passwords_optimized_multi(
     int hash_table_size
 ) {
     __shared__ uint8_t shared_salt[8];
-
-
+    uint8_t hash[32];
 
     // Calculate thread position for parallel password generation
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -329,7 +351,6 @@ __global__ void find_passwords_optimized_multi(
 
         __syncthreads();
         
-        
 
         // Process multiple passwords per thread using stride
         for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += stride) {
@@ -338,18 +359,18 @@ __global__ void find_passwords_optimized_multi(
             // Combined password and salt array
             uint8_t combined[14];
             
+            #pragma unroll
             for (int i = 0; i < 6; ++i) {
                 combined[i] = charset[idx % 62];
+                combined[6 + i] = shared_salt[i];
                 idx = static_cast<uint64_t>(idx * reciprocal); // Approximate division by 62
             }       
             // Use shared memory for salt
-            #pragma unroll
-            for (int i = 0; i < 8; ++i) {
-                combined[6 + i] = shared_salt[i];
-            }
+            combined[12] = shared_salt[6];
+            combined[13] = shared_salt[7];
+            
 
-            // Compute hash
-            uint8_t hash[32];
+
 
             sha256(combined, hash);
 
@@ -403,7 +424,7 @@ __global__ void find_passwords_optimized_multi(
                 }
             
                 // Move to the next index in case of a collision
-                index = (index + 1) % hash_table_size;
+                index = index + 1;
             }
         }
     }
