@@ -33,25 +33,6 @@ __constant__ char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVW
 // Precompute the reciprocal of 62 for division optimization
 __constant__ double reciprocal = 1.0 / 62.0;
 
-// __constant__ array for device-side K values
-__constant__ static const uint32_t K[64] = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-
 struct FoundPassword {
     char password[7];
     uint8_t hash[32];
@@ -80,6 +61,24 @@ __device__ void sha256(const uint8_t* __restrict__ data, uint8_t* __restrict__ h
     uint32_t f = 0x9b05688c;
     uint32_t g = 0x1f83d9ab;
     uint32_t h = 0x5be0cd19;
+
+    static const uint32_t K[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
     uint32_t W[64];
     W[0] = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
@@ -181,150 +180,71 @@ void hexToBytes(const char* hex, uint8_t* bytes) {
     }
 }
 
-unsigned int xxHash32Host(const uint8_t* data, int length, unsigned int seed = 0) {
-    const unsigned int PRIME32_1 = 2654435761U;
-    const unsigned int PRIME32_2 = 2246822519U;
-    const unsigned int PRIME32_3 = 3266489917U;
-    const unsigned int PRIME32_4 = 668265263U;
-    const unsigned int PRIME32_5 = 374761393U;
+#include <cstdint>
 
-    unsigned int hash;
+unsigned int fastHashHost(const uint8_t* data, int length, unsigned int seed = 0) {
+    unsigned int hash = seed;
     int index = 0;
 
-    if (length >= 16) {
-        unsigned int v1 = seed + PRIME32_1 + PRIME32_2;
-        unsigned int v2 = seed + PRIME32_2;
-        unsigned int v3 = seed + 0;
-        unsigned int v4 = seed - PRIME32_1;
-
-        const int limit = length - 16;
-        do {
-            v1 += (*(unsigned int*)(data + index)) * PRIME32_2;
-            v1 = (v1 << 13) | (v1 >> (32 - 13));
-            v1 *= PRIME32_1;
-            index += 4;
-
-            v2 += (*(unsigned int*)(data + index)) * PRIME32_2;
-            v2 = (v2 << 13) | (v2 >> (32 - 13));
-            v2 *= PRIME32_1;
-            index += 4;
-
-            v3 += (*(unsigned int*)(data + index)) * PRIME32_2;
-            v3 = (v3 << 13) | (v3 >> (32 - 13));
-            v3 *= PRIME32_1;
-            index += 4;
-
-            v4 += (*(unsigned int*)(data + index)) * PRIME32_2;
-            v4 = (v4 << 13) | (v4 >> (32 - 13));
-            v4 *= PRIME32_1;
-            index += 4;
-        } while (index <= limit);
-
-        hash = ((v1 << 1) | (v1 >> (32 - 1))) +
-               ((v2 << 7) | (v2 >> (32 - 7))) +
-               ((v3 << 12) | (v3 >> (32 - 12))) +
-               ((v4 << 18) | (v4 >> (32 - 18)));
-    } else {
-        hash = seed + PRIME32_5;
-    }
-
-    hash += length;
-
-    while (index <= length - 4) {
-        hash += (*(unsigned int*)(data + index)) * PRIME32_3;
-        hash = ((hash << 17) | (hash >> (32 - 17))) * PRIME32_4;
-        index += 4;
-    }
-
-    while (index < length) {
-        hash += data[index] * PRIME32_5;
-        hash = ((hash << 11) | (hash >> (32 - 11))) * PRIME32_1;
-        index++;
-    }
-
-    hash ^= hash >> 15;
-    hash *= PRIME32_2;
-    hash ^= hash >> 13;
-    hash *= PRIME32_3;
-    hash ^= hash >> 16;
-
-    return hash;
-}
-
-__device__ __forceinline__ unsigned int xxHash32Device(const uint8_t* data, int length, unsigned int seed = 0) {
-    const unsigned int PRIME32_1 = 2654435761U;
-    const unsigned int PRIME32_2 = 2246822519U;
-    const unsigned int PRIME32_3 = 3266489917U;
-    const unsigned int PRIME32_4 = 668265263U;
-    const unsigned int PRIME32_5 = 374761393U;
-
-    unsigned int hash;
-    int index = 0;
-
-    if (length >= 16) {
-        unsigned int v1 = seed + PRIME32_1 + PRIME32_2;
-        unsigned int v2 = seed + PRIME32_2;
-        unsigned int v3 = seed + 0;
-        unsigned int v4 = seed - PRIME32_1;
-
-        const int limit = length - 16;
-        do {
-            unsigned int k1 = *(unsigned int*)(data + index);
-            v1 += k1 * PRIME32_2;
-            v1 = (v1 << 13) | (v1 >> (32 - 13));
-            v1 *= PRIME32_1;
-            index += 4;
-
-            unsigned int k2 = *(unsigned int*)(data + index);
-            v2 += k2 * PRIME32_2;
-            v2 = (v2 << 13) | (v2 >> (32 - 13));
-            v2 *= PRIME32_1;
-            index += 4;
-
-            unsigned int k3 = *(unsigned int*)(data + index);
-            v3 += k3 * PRIME32_2;
-            v3 = (v3 << 13) | (v3 >> (32 - 13));
-            v3 *= PRIME32_1;
-            index += 4;
-
-            unsigned int k4 = *(unsigned int*)(data + index);
-            v4 += k4 * PRIME32_2;
-            v4 = (v4 << 13) | (v4 >> (32 - 13));
-            v4 *= PRIME32_1;
-            index += 4;
-        } while (index <= limit);
-
-        hash = ((v1 << 1) | (v1 >> (32 - 1))) +
-               ((v2 << 7) | (v2 >> (32 - 7))) +
-               ((v3 << 12) | (v3 >> (32 - 12))) +
-               ((v4 << 18) | (v4 >> (32 - 18)));
-    } else {
-        hash = seed + PRIME32_5;
-    }
-
-    hash += length;
-
+    // Process data in 4-byte chunks
     while (index <= length - 4) {
         unsigned int k = *(unsigned int*)(data + index);
-        hash += k * PRIME32_3;
-        hash = ((hash << 17) | (hash >> (32 - 17))) * PRIME32_4;
+        hash ^= k;
+        hash = (hash << 5) | (hash >> (32 - 5)); // Rotate left by 5
+        hash *= 0x27d4eb2d; // A prime number
         index += 4;
     }
 
+    // Process remaining bytes
     while (index < length) {
-        hash += data[index] * PRIME32_5;
-        hash = ((hash << 11) | (hash >> (32 - 11))) * PRIME32_1;
+        hash ^= data[index];
+        hash = (hash << 3) | (hash >> (32 - 3)); // Rotate left by 3
+        hash *= 0x165667b1; // Another prime number
         index++;
     }
 
+    // Final mixing
     hash ^= hash >> 15;
-    hash *= PRIME32_2;
+    hash *= 0x85ebca6b;
     hash ^= hash >> 13;
-    hash *= PRIME32_3;
+    hash *= 0xc2b2ae35;
     hash ^= hash >> 16;
 
     return hash;
 }
+
+
+__device__ __forceinline__ unsigned int fastHash(const uint8_t* data, int length, unsigned int seed = 0) {
+    unsigned int hash = seed;
+    int index = 0;
+
+    // Process data in 4-byte chunks
+    while (index <= length - 4) {
+        unsigned int k = *(unsigned int*)(data + index);
+        hash ^= k;
+        hash = (hash << 5) | (hash >> (32 - 5)); // Rotate left by 5
+        hash *= 0x27d4eb2d; // A prime number
+        index += 4;
+    }
+
+    // Process remaining bytes
+    while (index < length) {
+        hash ^= data[index];
+        hash = (hash << 3) | (hash >> (32 - 3)); // Rotate left by 3
+        hash *= 0x165667b1; // Another prime number
+        index++;
+    }
+
+    // Final mixing
+    hash ^= hash >> 15;
+    hash *= 0x85ebca6b;
+    hash ^= hash >> 13;
+    hash *= 0xc2b2ae35;
+    hash ^= hash >> 16;
+
+    return hash;
+}
+
 
 __global__ void find_passwords_optimized_multi(
     const uint8_t* __restrict__ target_salts,
@@ -376,7 +296,7 @@ __global__ void find_passwords_optimized_multi(
 
             // Iterate over all hashes for the current salt
             // Calculate the hash value for the computed hash
-            unsigned int hash_value = xxHash32Device(hash, 8);
+            unsigned int hash_value = fastHash(hash, 8);
 
             // Determine the index in the hash table
             int index = hash_value % hash_table_size;
@@ -493,7 +413,7 @@ int main() {
     for (int salt_index = 0; salt_index < 10; salt_index++) {
         for (int hash_index = 0; hash_index < 100; hash_index++) {
             // Calculate the hash value for the current hash
-            unsigned int hash_value = xxHash32Host(all_target_hashes[salt_index][hash_index], 8);
+            unsigned int hash_value = fastHashHost(all_target_hashes[salt_index][hash_index], 8);
 
             // Determine the index in the hash table
             int index = hash_value % HASH_TABLE_SIZE;
