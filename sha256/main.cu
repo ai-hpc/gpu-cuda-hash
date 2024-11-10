@@ -53,138 +53,96 @@ struct FoundPassword {
     uint8_t hash[32];
     uint8_t salt[8];
 };
-    
-class SHA256 {
-private:
-    uint32_t state[8];
-    uint8_t data[64];
+#include <iostream>
+#include <iomanip>
+#include <cstdint>
 
-    __device__ __forceinline__ static uint32_t rotr(uint32_t x, uint32_t n) {
-        uint32_t result;
-        asm("shf.r.wrap.b32 %0, %1, %1, %2;" : "=r"(result) : "r"(x), "r"(n));
-        return result;
+
+// Right rotate function
+__device__ __forceinline__ uint32_t rotr(uint32_t x, uint32_t n) {
+    uint32_t result;
+    asm("shf.r.wrap.b32 %0, %1, %1, %2;" : "=r"(result) : "r"(x), "r"(n));
+    return result;
+}
+
+// SHA-256 hash function
+__device__ void sha256(const uint8_t* __restrict__ input, uint8_t* __restrict__ hash) {
+    uint32_t state[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    };
+
+    uint8_t data[64] = {0};
+    #pragma unroll
+    for (size_t i = 0; i < 14; i++) {
+        data[i] = input[i];
     }
 
-    __device__ __forceinline__ void transform() {
-        uint32_t W[64];
-        
-        // Initial message schedule setup
-        W[0] = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
-            ((uint32_t)data[2] << 8) | data[3];
-        
-        W[1] = ((uint32_t)data[4] << 24) | ((uint32_t)data[5] << 16) |
-            ((uint32_t)data[6] << 8) | data[7];
-        
-        W[2] = ((uint32_t)data[8] << 24) | ((uint32_t)data[9] << 16) |
-            ((uint32_t)data[10] << 8) | data[11];
-        
-        W[3] = ((uint32_t)data[12] << 24) | ((uint32_t)data[13] << 16) | 0x8000;
+    uint32_t W[64];
+    W[0] = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
+    W[1] = ((uint32_t)data[4] << 24) | ((uint32_t)data[5] << 16) | ((uint32_t)data[6] << 8) | data[7];
+    W[2] = ((uint32_t)data[8] << 24) | ((uint32_t)data[9] << 16) | ((uint32_t)data[10] << 8) | data[11];
+    W[3] = ((uint32_t)data[12] << 24) | ((uint32_t)data[13] << 16) | 0x8000;
 
-        // Use 32-bit writes to zero out multiple elements at once
-        *(uint4*)&W[4] = make_uint4(0, 0, 0, 0);  // Zeros W[4] through W[7]
-        *(uint4*)&W[8] = make_uint4(0, 0, 0, 0);  // Zeros W[8] through W[11]
-        *(uint2*)&W[12] = make_uint2(0, 0);       // Zeros W[12] through W[13]
-        W[14] = 0;    
-        W[15] = 112;
+    *(uint4*)&W[4] = make_uint4(0, 0, 0, 0);
+    *(uint4*)&W[8] = make_uint4(0, 0, 0, 0);
+    *(uint2*)&W[12] = make_uint2(0, 0);
+    W[14] = 0;
+    W[15] = 112;
 
-        #pragma unroll 48
-        for(int i = 16; i < 64; i++) {
-            uint32_t s0 = rotr(W[i-15], 7) ^ rotr(W[i-15], 18) ^ (W[i-15] >> 3);
-            uint32_t s1 = rotr(W[i-2], 17) ^ rotr(W[i-2], 19) ^ (W[i-2] >> 10);
-            W[i] = W[i-16] + s0 + W[i-7] + s1;
-        }
-
-        uint32_t a = state[0];
-        uint32_t b = state[1];
-        uint32_t c = state[2];
-        uint32_t d = state[3];
-        uint32_t e = state[4];
-        uint32_t f = state[5];
-        uint32_t g = state[6];
-        uint32_t h = state[7];
-
-        #pragma unroll 64
-        for(int i = 0; i < 64; i++) {
-            // Pre-calculate rotations for better instruction pipelining
-            register uint32_t S1, S0;
-
-            // Calculate S1
-            S1 = (e >> 6) | (e << (32 - 6));
-            S1 ^= (e >> 11) | (e << (32 - 11));
-            S1 ^= (e >> 25) | (e << (32 - 25));
-            
-            // Calculate S0
-            S0 = (a >> 2) | (a << (32 - 2));
-            S0 ^= (a >> 13) | (a << (32 - 13));
-            S0 ^= (a >> 22) | (a << (32 - 22));
-            
-
-            register uint32_t ch;
-            register uint32_t maj;
-            
-            // Choice function
-            ch = (e & f) ^ (~e & g);
-            
-            // Majority function 
-            maj = (a & b) ^ (a & c) ^ (b & c);
-            
-
-            // Combine calculations efficiently
-            register uint32_t temp1 = h + S1 + ch + K[i] + W[i];
-            register uint32_t temp2 = S0 + maj;
-
-            h = g;
-            g = f;
-            f = e;
-            e = d + temp1;
-            d = c;
-            c = b;
-            b = a;
-            a = temp1 + temp2;
-        }
-        state[0] += a;
-        state[1] += b;
-        state[2] += c;
-        state[3] += d;
-        state[4] += e;
-        state[5] += f;
-        state[6] += g;
-        state[7] += h;
+    #pragma unroll 48
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >> 3);
+        uint32_t s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >> 10);
+        W[i] = W[i - 16] + s0 + W[i - 7] + s1;
     }
 
-public:
-    __device__ __forceinline__ SHA256() {
-        state[0] = 0x6a09e667;
-        state[1] = 0xbb67ae85;
-        state[2] = 0x3c6ef372;
-        state[3] = 0xa54ff53a;
-        state[4] = 0x510e527f;
-        state[5] = 0x9b05688c;
-        state[6] = 0x1f83d9ab;
-        state[7] = 0x5be0cd19;
+    uint32_t a = state[0];
+    uint32_t b = state[1];
+    uint32_t c = state[2];
+    uint32_t d = state[3];
+    uint32_t e = state[4];
+    uint32_t f = state[5];
+    uint32_t g = state[6];
+    uint32_t h = state[7];
+
+    #pragma unroll 64
+    for (int i = 0; i < 64; i++) {
+        uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        uint32_t ch = (e & f) ^ (~e & g);
+        uint32_t temp1 = h + S1 + ch + K[i] + W[i];
+        uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2 = S0 + maj;
+
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1 + temp2;
     }
 
-    __device__ __forceinline__ void computeHash(const uint8_t* __restrict__ input, uint8_t* __restrict__ hash) {
-        // Update the data array with the input
-        #pragma unroll
-        for (size_t i = 0; i < 14; i++) {
-            data[i] = input[i];
-        }
-    
-        // Perform the transformation
-        transform();
-    
-        // Finalize the hash computation
-        #pragma unroll 8
-        for (int i = 0; i < 8; i++) {
-            uint32_t s = state[i];
-            hash[i*4] = s >> 24;
-            hash[i*4 + 1] = s >> 16;
-            hash[i*4 + 2] = s >> 8;
-            hash[i*4 + 3] = s;
-        }
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+    state[5] += f;
+    state[6] += g;
+    state[7] += h;
+
+    #pragma unroll 8
+    for (int i = 0; i < 8; i++) {
+        uint32_t s = state[i];
+        hash[i * 4] = s >> 24;
+        hash[i * 4 + 1] = s >> 16;
+        hash[i * 4 + 2] = s >> 8;
+        hash[i * 4 + 3] = s;
     }
-};
+}
 
 #endif
 
@@ -352,6 +310,8 @@ __global__ void find_passwords_optimized_multi(
 ) {
     __shared__ uint8_t shared_salt[8];
 
+
+
     // Calculate thread position for parallel password generation
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t stride = blockDim.x * gridDim.x;
@@ -364,6 +324,8 @@ __global__ void find_passwords_optimized_multi(
         }
 
         __syncthreads();
+        
+        
 
         // Process multiple passwords per thread using stride
         for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += stride) {
@@ -378,19 +340,16 @@ __global__ void find_passwords_optimized_multi(
             combined[3] = charset[idx % 62]; idx /= 62;
             combined[4] = charset[idx % 62]; idx /= 62;
             combined[5] = charset[idx % 62]; idx /= 62;         
-
             // Use shared memory for salt
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
                 combined[6 + i] = shared_salt[i];
             }
 
-            // Instantiate SHA256 object
-            SHA256 sha256;
-
             // Compute hash
             uint8_t hash[32];
-            sha256.computeHash(combined, hash);
+
+            sha256(combined, hash);
 
             // Iterate over all hashes for the current salt
             // Calculate the hash value for the computed hash
