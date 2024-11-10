@@ -29,6 +29,10 @@ __constant__ char d_target_salt[16 + 1];
 __constant__ uint8_t d_target_hash[32];
 __constant__ char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
+
+// Precompute the reciprocal of 62 for division optimization
+__constant__ double reciprocal = 1.0 / 62.0;
+
 // __constant__ array for device-side K values
 __constant__ static const uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
@@ -334,12 +338,10 @@ __global__ void find_passwords_optimized_multi(
             // Combined password and salt array
             uint8_t combined[14];
             
-            combined[0] = charset[idx % 62]; idx /= 62;
-            combined[1] = charset[idx % 62]; idx /= 62;
-            combined[2] = charset[idx % 62]; idx /= 62;
-            combined[3] = charset[idx % 62]; idx /= 62;
-            combined[4] = charset[idx % 62]; idx /= 62;
-            combined[5] = charset[idx % 62]; idx /= 62;         
+            for (int i = 0; i < 6; ++i) {
+                combined[i] = charset[idx % 62];
+                idx = static_cast<uint64_t>(idx * reciprocal); // Approximate division by 62
+            }       
             // Use shared memory for salt
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
