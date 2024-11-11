@@ -180,66 +180,20 @@ void hexToBytes(const char* hex, uint8_t* bytes) {
     }
 }
 
-int f(const uint8_t* data) {
+int f(const uint8_t* data, int length) {
     unsigned int hash = 0;
-    int length = 10;
-    int index = 0;
-
-    // Process data in 4-byte chunks
-    while (index <= length - 4) {
-        unsigned int k = *(unsigned int*)(data + index);
-        hash ^= k;
-        hash = (hash << 5) | (hash >> (32 - 5)); // Rotate left by 5
-        hash *= 0x27d4eb2d; // A prime number
-        index += 4;
+    for (int i = 0; i < length; ++i) {
+        hash = hash * 31 + data[i];
     }
-
-    // Process remaining bytes
-    while (index < length) {
-        hash ^= data[index];
-        hash = (hash << 3) | (hash >> (32 - 3)); // Rotate left by 3
-        hash *= 0x165667b1; // Another prime number
-        index++;
-    }
-
-    // Final mixing
-    hash ^= hash >> 15;
-    hash *= 0x85ebca6b;
-    hash ^= hash >> 13;
-    hash *= 0xc2b2ae35;
-    hash ^= hash >> 16;
-    return hash % 19997;
+    return hash % 1999997;
 }
 
-__device__ int f2(const uint8_t* data) {
+__device__ int f2(const uint8_t* data, int length) {
     unsigned int hash = 0;
-    int length = 10;
-    int index = 0;
-
-    // Process data in 4-byte chunks
-    while (index <= length - 4) {
-        unsigned int k = *(unsigned int*)(data + index);
-        hash ^= k;
-        hash = (hash << 5) | (hash >> (32 - 5)); // Rotate left by 5
-        hash *= 0x27d4eb2d; // A prime number
-        index += 4;
+    for (int i = 0; i < length; ++i) {
+        hash = hash * 31 + data[i];
     }
-
-    // Process remaining bytes
-    while (index < length) {
-        hash ^= data[index];
-        hash = (hash << 3) | (hash >> (32 - 3)); // Rotate left by 3
-        hash *= 0x165667b1; // Another prime number
-        index++;
-    }
-
-    // Final mixing
-    hash ^= hash >> 15;
-    hash *= 0x85ebca6b;
-    hash ^= hash >> 13;
-    hash *= 0xc2b2ae35;
-    hash ^= hash >> 16;
-    return hash % 19997;
+    return hash % 1999997;
 }
 
 __global__ void find_passwords_optimized_multi(
@@ -285,17 +239,22 @@ __global__ void find_passwords_optimized_multi(
             combined[13] = shared_salt[7];
             
             sha256(combined, hash);
-            int index = f2(hash);
-            int value = f2(hash + 6);
-            if(index == 17104 && value == 16115){
-                //print combined
-                printf("Index: %d, Value: %d, Found password: %s\n", index, value, combined);   
-            }
+            int index = f2(hash, 8);
             
             // Use linear probing to resolve collisions
             while (d_hash_data[index] != -1) {
 
-                if (d_hash_data[index] == value) {
+                int target_index = d_hash_data[index];
+                const uint8_t* current_target = &target_hashes[target_index * 32];
+                bool match = true;
+                #pragma unroll 8
+                for (int k = 28; k < 32; k += 4) {
+                    if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
                     atomicAdd(num_found, 1);
                     // printf("index: %d, hash_data[index]: %d\n", index, d_hash_data[index]);
                     break;
@@ -404,7 +363,7 @@ int main() {
     }
 
 
-    const int HASH_TABLE_SIZE = 19997; // Adjusted to accommodate 1000 target hashes
+    const int HASH_TABLE_SIZE = 1999997; // Adjusted to accommodate 1000 target hashes
 
     // Initialize and populate hash table
     std::vector<int> hash_data(HASH_TABLE_SIZE, -1);
@@ -412,7 +371,7 @@ int main() {
     for (int salt_index = 0; salt_index < 10; salt_index++) {
         for (int hash_index = 0; hash_index < 100; hash_index++) {
             // Calculate the hash value for the current hash
-            int index = f(all_target_hashes[salt_index][hash_index]);
+            int index = f(all_target_hashes[salt_index][hash_index], 8);
 
             // Use linear probing to resolve collisions
             while (hash_data[index] != -1) {
@@ -420,7 +379,7 @@ int main() {
             }
 
             // Store the index of the hash in the hash table
-            hash_data[index] = f(all_target_hashes[salt_index][hash_index]+6);
+            hash_data[index] = salt_index * 100 + hash_index;
 
             // printf("index: %d, hash_data[index]: %d\n", index, hash_data[index]);
         }
