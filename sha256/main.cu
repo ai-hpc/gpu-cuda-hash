@@ -213,7 +213,7 @@ __global__ void find_passwords_optimized_multi(
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     // Iterate over each salt
-    for (int salt_idx = 0; salt_idx < 10; ++salt_idx) {
+    for (int salt_idx = 0; salt_idx < 2; ++salt_idx) {
         // Load the current salt into shared memory
         if (threadIdx.x < 8) {
             shared_salt[threadIdx.x] = target_salts[salt_idx * 8 + threadIdx.x];
