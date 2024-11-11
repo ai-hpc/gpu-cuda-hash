@@ -180,10 +180,9 @@ void hexToBytes(const char* hex, uint8_t* bytes) {
     }
 }
 
-#include <cstdint>
-
-unsigned int fastHashHost(const uint8_t* data, int length, unsigned int seed = 0) {
-    unsigned int hash = seed;
+int f(const uint8_t* data) {
+    unsigned int hash = 0;
+    int length = 10;
     int index = 0;
 
     // Process data in 4-byte chunks
@@ -209,13 +208,12 @@ unsigned int fastHashHost(const uint8_t* data, int length, unsigned int seed = 0
     hash ^= hash >> 13;
     hash *= 0xc2b2ae35;
     hash ^= hash >> 16;
-
-    return hash;
+    return hash % 19997;
 }
 
-
-__device__ __forceinline__ unsigned int fastHash(const uint8_t* data, int length, unsigned int seed = 0) {
-    unsigned int hash = seed;
+__device__ int f2(const uint8_t* data) {
+    unsigned int hash = 0;
+    int length = 10;
     int index = 0;
 
     // Process data in 4-byte chunks
@@ -241,10 +239,8 @@ __device__ __forceinline__ unsigned int fastHash(const uint8_t* data, int length
     hash ^= hash >> 13;
     hash *= 0xc2b2ae35;
     hash ^= hash >> 16;
-
-    return hash;
+    return hash % 19997;
 }
-
 
 __global__ void find_passwords_optimized_multi(
     const uint8_t* __restrict__ target_salts,
@@ -257,13 +253,13 @@ __global__ void find_passwords_optimized_multi(
 ) {
     __shared__ uint8_t shared_salt[8];
     uint8_t hash[32];
+    uint8_t combined[14];
 
     // Calculate thread position for parallel password generation
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t stride = blockDim.x * gridDim.x;
 
     // Iterate over each salt
-    for (int salt_idx = 0; salt_idx < 10; ++salt_idx) {
+    for (int salt_idx = 0; salt_idx < 3; ++salt_idx) {
         // Load the current salt into shared memory
         if (threadIdx.x < 8) {
             shared_salt[threadIdx.x] = target_salts[salt_idx * 8 + threadIdx.x];
@@ -273,11 +269,10 @@ __global__ void find_passwords_optimized_multi(
         
 
         // Process multiple passwords per thread using stride
-        for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += stride) {
+        for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += 1572864) {
             uint64_t idx = password_idx;
 
-            // Combined password and salt array
-            uint8_t combined[14];
+            
             
             #pragma unroll
             for (int i = 0; i < 6; ++i) {
@@ -289,61 +284,65 @@ __global__ void find_passwords_optimized_multi(
             combined[12] = shared_salt[6];
             combined[13] = shared_salt[7];
             
-
-
-
             sha256(combined, hash);
-
-            // Iterate over all hashes for the current salt
-            // Calculate the hash value for the computed hash
-            unsigned int hash_value = fastHash(hash, 8);
-
-            // Determine the index in the hash table
-            int index = hash_value % hash_table_size;
+            int index = f2(hash);
+            int value = f2(hash + 6);
+            if(index == 17104 && value == 16115){
+                //print combined
+                printf("Index: %d, Value: %d, Found password: %s\n", index, value, combined);   
+            }
             
             // Use linear probing to resolve collisions
             while (d_hash_data[index] != -1) {
-                // Get the target hash index from the hash table
-                int target_index = d_hash_data[index];
-                const uint8_t* current_target = &target_hashes[target_index * 32];
-            
-                // Compare the computed hash with the target hash
-                bool match = true;
-                #pragma unroll 8
-                for (int k = 0; k < 32; k += 4) {
-                    if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-                        match = false;
-                        break;
-                    }
-                }
-            
-                if (match) {
-                    int found_idx = atomicAdd(num_found, 1);
-                    if (found_idx < MAX_FOUND) {
-                        // Directly assign characters to the password array
-                        found_passwords[found_idx].password[0] = combined[0];
-                        found_passwords[found_idx].password[1] = combined[1];
-                        found_passwords[found_idx].password[2] = combined[2];
-                        found_passwords[found_idx].password[3] = combined[3];
-                        found_passwords[found_idx].password[4] = combined[4];
-                        found_passwords[found_idx].password[5] = combined[5];
-                        found_passwords[found_idx].password[6] = '\0'; // Null-terminate the string
 
-                        // Use a loop to copy the hash and salt, which are larger
-                        #pragma unroll
-                        for (int i = 0; i < 32; ++i) {
-                            found_passwords[found_idx].hash[i] = hash[i];
-                        }
-
-                        #pragma unroll
-                        for (int i = 0; i < 8; ++i) {
-                            found_passwords[found_idx].salt[i] = shared_salt[i];
-                        }
-                    }
-                    break; // Exit loop once a match is found
+                if (d_hash_data[index] == value) {
+                    atomicAdd(num_found, 1);
+                    // printf("index: %d, hash_data[index]: %d\n", index, d_hash_data[index]);
+                    break;
+                    // printf("Found password: %s\n", combined);
+                    // int found_idx = atomicAdd(num_found, 1);
                 }
+            //     // Get the target hash index from the hash table
+            //     int target_index = d_hash_data[index];
+            //     const uint8_t* current_target = &target_hashes[target_index * 32];
             
-                // Move to the next index in case of a collision
+            //     // Compare the computed hash with the target hash
+            //     bool match = true;
+            //     #pragma unroll 8
+            //     for (int k = 0; k < 32; k += 4) {
+            //         if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+            //             match = false;
+            //             break;
+            //         }
+            //     }
+            
+            //     if (match) {
+            //         int found_idx = atomicAdd(num_found, 1);
+            //         if (found_idx < MAX_FOUND) {
+            //             // Directly assign characters to the password array
+            //             found_passwords[found_idx].password[0] = combined[0];
+            //             found_passwords[found_idx].password[1] = combined[1];
+            //             found_passwords[found_idx].password[2] = combined[2];
+            //             found_passwords[found_idx].password[3] = combined[3];
+            //             found_passwords[found_idx].password[4] = combined[4];
+            //             found_passwords[found_idx].password[5] = combined[5];
+            //             found_passwords[found_idx].password[6] = '\0'; // Null-terminate the string
+
+            //             // Use a loop to copy the hash and salt, which are larger
+            //             #pragma unroll
+            //             for (int i = 0; i < 32; ++i) {
+            //                 found_passwords[found_idx].hash[i] = hash[i];
+            //             }
+
+            //             #pragma unroll
+            //             for (int i = 0; i < 8; ++i) {
+            //                 found_passwords[found_idx].salt[i] = shared_salt[i];
+            //             }
+            //         }
+            //         break; // Exit loop once a match is found
+            //     }
+            
+            //     // Move to the next index in case of a collision
                 index = index + 1;
             }
         }
@@ -413,10 +412,7 @@ int main() {
     for (int salt_index = 0; salt_index < 10; salt_index++) {
         for (int hash_index = 0; hash_index < 100; hash_index++) {
             // Calculate the hash value for the current hash
-            unsigned int hash_value = fastHashHost(all_target_hashes[salt_index][hash_index], 8);
-
-            // Determine the index in the hash table
-            int index = hash_value % HASH_TABLE_SIZE;
+            int index = f(all_target_hashes[salt_index][hash_index]);
 
             // Use linear probing to resolve collisions
             while (hash_data[index] != -1) {
@@ -424,7 +420,9 @@ int main() {
             }
 
             // Store the index of the hash in the hash table
-            hash_data[index] = salt_index * 100 + hash_index;
+            hash_data[index] = f(all_target_hashes[salt_index][hash_index]+6);
+
+            // printf("index: %d, hash_data[index]: %d\n", index, hash_data[index]);
         }
     }
 
@@ -520,21 +518,21 @@ int main() {
     cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
 
     // Iterate over the found passwords and print their details
-    for (int i = 0; i < h_num_found; i++) {
-        const FoundPassword& fp = h_found_passwords[i];
+    // for (int i = 0; i < h_num_found; i++) {
+    //     const FoundPassword& fp = h_found_passwords[i];
         
-        // Print the hash
-        for (int j = 0; j < 32; j++) {
-            printf("%02x", fp.hash[j]);
-        }
-        printf(":");
+    //     // Print the hash
+    //     for (int j = 0; j < 32; j++) {
+    //         printf("%02x", fp.hash[j]);
+    //     }
+    //     printf(":");
         
-        // Print the salt
-        for (int j = 0; j < 8; j++) {
-            printf("%02x", fp.salt[j]);
-        }
-        printf(":%s\n", fp.password);
-    }
+    //     // Print the salt
+    //     for (int j = 0; j < 8; j++) {
+    //         printf("%02x", fp.salt[j]);
+    //     }
+    //     printf(":%s\n", fp.password);
+    // }
 
     // Print the total number of found passwords
     printf("\nFound %d passwords\n", h_num_found);
