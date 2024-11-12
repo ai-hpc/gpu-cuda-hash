@@ -386,24 +386,24 @@ __global__ void find_passwords_optimized_multi(
                 if (binarySearchHashes(sortedHashes, num_hashes, hash)) {
                     int found_idx = atomicAdd(num_found, 1);
                     // Directly assign characters to the password array
-                    found_passwords[found_idx].password[0] = combined[0];
-                    found_passwords[found_idx].password[1] = combined[1];
-                    found_passwords[found_idx].password[2] = combined[2];
-                    found_passwords[found_idx].password[3] = combined[3];
-                    found_passwords[found_idx].password[4] = combined[4];
-                    found_passwords[found_idx].password[5] = combined[5];
-                    found_passwords[found_idx].password[6] = '\0'; // Null-terminate the string
+                    // found_passwords[found_idx].password[0] = combined[0];
+                    // found_passwords[found_idx].password[1] = combined[1];
+                    // found_passwords[found_idx].password[2] = combined[2];
+                    // found_passwords[found_idx].password[3] = combined[3];
+                    // found_passwords[found_idx].password[4] = combined[4];
+                    // found_passwords[found_idx].password[5] = combined[5];
+                    // found_passwords[found_idx].password[6] = '\0'; // Null-terminate the string
 
-                    // Use a loop to copy the hash and salt, which are larger
-                    #pragma unroll
-                    for (int i = 0; i < 32; ++i) {
-                        found_passwords[found_idx].hash[i] = hash[i];
-                    }
+                    // // Use a loop to copy the hash and salt, which are larger
+                    // #pragma unroll
+                    // for (int i = 0; i < 32; ++i) {
+                    //     found_passwords[found_idx].hash[i] = hash[i];
+                    // }
 
-                    #pragma unroll
-                    for (int i = 0; i < 8; ++i) {
-                        found_passwords[found_idx].salt[i] = shared_salt[i];
-                    }
+                    // #pragma unroll
+                    // for (int i = 0; i < 8; ++i) {
+                    //     found_passwords[found_idx].salt[i] = shared_salt[i];
+                    // }
                     return; // Early exit for this thread
                 }
                 // bool match = true;
@@ -653,21 +653,21 @@ int main() {
     cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
 
     // Iterate over the found passwords and print their details
-    for (int i = 0; i < h_num_found; i++) {
-        const FoundPassword& fp = h_found_passwords[i];
+    // for (int i = 0; i < h_num_found; i++) {
+    //     const FoundPassword& fp = h_found_passwords[i];
         
-        // Print the hash
-        for (int j = 0; j < 32; j++) {
-            printf("%02x", fp.hash[j]);
-        }
-        printf(":");
+    //     // Print the hash
+    //     for (int j = 0; j < 32; j++) {
+    //         printf("%02x", fp.hash[j]);
+    //     }
+    //     printf(":");
         
-        // Print the salt
-        for (int j = 0; j < 8; j++) {
-            printf("%02x", fp.salt[j]);
-        }
-        printf(":%s\n", fp.password);
-    }
+    //     // Print the salt
+    //     for (int j = 0; j < 8; j++) {
+    //         printf("%02x", fp.salt[j]);
+    //     }
+    //     printf(":%s\n", fp.password);
+    // }
 
     // Print the total number of found passwords
     printf("\nFound %d passwords\n", h_num_found);
