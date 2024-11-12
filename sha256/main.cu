@@ -7,9 +7,7 @@
 #include <cuda_runtime.h>
 #include <vector>
 #include <unordered_map>
-
-#ifndef SHA256_CUH
-#define SHA256_CUH
+#include <cstdint>
 
 // Add these color definitions at the top
 #define RED     "\033[31m"
@@ -25,12 +23,7 @@
 
 
 __constant__ const unsigned long long total_passwords = 62ULL * 62 * 62 * 62 * 62 * 62;
-__constant__ char d_target_salt[16 + 1];
-__constant__ uint8_t d_target_hash[32];
 __constant__ char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-
-
-// Precompute the reciprocal of 62 for division optimization
 __constant__ double reciprocal = 1.0 / 62.0;
 
 struct FoundPassword {
@@ -38,10 +31,6 @@ struct FoundPassword {
     uint8_t hash[32];
     uint8_t salt[8];
 };
-#include <iostream>
-#include <iomanip>
-#include <cstdint>
-
 
 // Right rotate function
 __device__ __forceinline__ uint32_t rotr(uint32_t x, uint32_t n) {
@@ -170,9 +159,6 @@ __device__ void sha256(const uint8_t* __restrict__ data, uint8_t* __restrict__ h
 }
 
 
-#endif
-
-
 // Fix the hexToBytes function to maintain byte order
 void hexToBytes(const char* hex, uint8_t* bytes) {
     for (int i = 0; i < strlen(hex)/2; i++) {
@@ -196,8 +182,157 @@ __device__ int f2(const uint8_t* data, int length) {
     return hash % 1999997;
 }
 
+// Node structure for AVL Tree
+struct AVLNode {
+    uint8_t hash[32];
+    AVLNode* left;
+    AVLNode* right;
+    int height;
+};
+
+// Function to create a new AVL node
+AVLNode* createNode(const uint8_t* hash) {
+    AVLNode* node = new AVLNode();
+    std::copy(hash, hash + 32, node->hash);
+    node->left = node->right = nullptr;
+    node->height = 1; // Initial height of a new node is 1
+    return node;
+}
+
+// Function to get the height of the tree
+int height(AVLNode* node) {
+    return node ? node->height : 0;
+}
+
+// Function to get the balance factor of a node
+int getBalance(AVLNode* node) {
+    return node ? height(node->left) - height(node->right) : 0;
+}
+
+// Right rotate the subtree rooted with y
+AVLNode* rightRotate(AVLNode* y) {
+    AVLNode* x = y->left;
+    AVLNode* T2 = x->right;
+
+    // Perform rotation
+    x->right = y;
+    y->left = T2;
+
+    // Update heights
+    y->height = std::max(height(y->left), height(y->right)) + 1;
+    x->height = std::max(height(x->left), height(x->right)) + 1;
+
+    // Return new root
+    return x;
+}
+
+// Left rotate the subtree rooted with x
+AVLNode* leftRotate(AVLNode* x) {
+    AVLNode* y = x->right;
+    AVLNode* T2 = y->left;
+
+    // Perform rotation
+    y->left = x;
+    x->right = T2;
+
+    // Update heights
+    x->height = std::max(height(x->left), height(x->right)) + 1;
+    y->height = std::max(height(y->left), height(y->right)) + 1;
+
+    // Return new root
+    return y;
+}
+
+// AVL tree insertion logic
+AVLNode* insert(AVLNode* node, const uint8_t* hash) {
+    if (!node) return createNode(hash);
+
+    if (std::lexicographical_compare(hash, hash + 32, node->hash, node->hash + 32)) {
+        node->left = insert(node->left, hash);
+    } else if (std::lexicographical_compare(node->hash, node->hash + 32, hash, hash + 32)) {
+        node->right = insert(node->right, hash);
+    } else {
+        return node; // Duplicate hashes are not allowed
+    }
+
+    // Update height and balance the tree
+    node->height = 1 + std::max(height(node->left), height(node->right));
+    int balance = getBalance(node);
+
+    // Perform rotations if necessary
+    if (balance > 1 && std::lexicographical_compare(hash, hash + 32, node->left->hash, node->left->hash + 32)) {
+        return rightRotate(node);
+    }
+    if (balance < -1 && std::lexicographical_compare(node->right->hash, node->right->hash + 32, hash, hash + 32)) {
+        return leftRotate(node);
+    }
+    if (balance > 1 && std::lexicographical_compare(node->left->hash, node->left->hash + 32, hash, hash + 32)) {
+        node->left = leftRotate(node->left);
+        return rightRotate(node);
+    }
+    if (balance < -1 && std::lexicographical_compare(hash, hash + 32, node->right->hash, node->right->hash + 32)) {
+        node->right = rightRotate(node->right);
+        return leftRotate(node);
+    }
+
+    return node;
+}
+
+// In-order traversal to flatten the AVL tree
+void inOrderTraversal(AVLNode* node, std::vector<std::vector<uint8_t>>& sortedHashes) {
+    if (node) {
+        inOrderTraversal(node->left, sortedHashes);
+        sortedHashes.push_back(std::vector<uint8_t>(node->hash, node->hash + 32));
+        inOrderTraversal(node->right, sortedHashes);
+    }
+}
+
+// Function to insert hashes into the AVL tree
+AVLNode* insertHashesIntoAVLTree(uint8_t all_target_hashes[10][100][32]) {
+    AVLNode* root = nullptr;
+
+    for (int salt_index = 0; salt_index < 10; salt_index++) {
+        for (int hash_index = 0; hash_index < 100; hash_index++) {
+            // Insert the hash into the AVL tree
+            root = insert(root, all_target_hashes[salt_index][hash_index]);
+        }
+    }
+
+    return root;
+}
+
+__device__ int compareHashes(const uint8_t* hash1, const uint8_t* hash2) {
+    for (int i = 0; i < 32; ++i) {
+        if (hash1[i] < hash2[i]) return -1;
+        if (hash1[i] > hash2[i]) return 1;
+    }
+    return 0;
+}
+
+__device__ bool binarySearchHashes(const uint8_t* sortedHashes, int num_hashes, const uint8_t* targetHash) {
+    int left = 0;
+    int right = num_hashes - 1;
+
+    while (left <= right) {
+        int mid = left + (right - left) / 2;
+
+        const uint8_t* midHash = &sortedHashes[mid * 32];
+        int cmp = compareHashes(targetHash, midHash);
+
+        if (cmp == 0) {
+            return true; // Match found
+        } else if (cmp < 0) {
+            right = mid - 1;
+        } else {
+            left = mid + 1;
+        }
+    }
+    return false; // No match found
+}
+
 __global__ void find_passwords_optimized_multi(
     const uint8_t* __restrict__ target_salts,
+    const uint8_t* __restrict__ sortedHashes,
     const uint8_t* __restrict__ target_hashes,
     int num_hashes,
     FoundPassword* __restrict__ found_passwords,
@@ -213,7 +348,7 @@ __global__ void find_passwords_optimized_multi(
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     // Iterate over each salt
-    for (int salt_idx = 0; salt_idx < 2; ++salt_idx) {
+    for (int salt_idx = 0; salt_idx < 10; ++salt_idx) {
         // Load the current salt into shared memory
         if (threadIdx.x < 8) {
             shared_salt[threadIdx.x] = target_salts[salt_idx * 8 + threadIdx.x];
@@ -240,27 +375,40 @@ __global__ void find_passwords_optimized_multi(
             
             sha256(combined, hash);
             int index = f2(hash, 8);
+
+            // Use binary search to find the hash
+            // if (binarySearchHashes(sortedHashes, num_hashes, hash)) {
+            //     atomicAdd(num_found, 1);
+            //     return; // Early exit for this thread
+            // }
             
             // Use linear probing to resolve collisions
             while (d_hash_data[index] != -1) {
 
-                int target_index = d_hash_data[index];
-                const uint8_t* current_target = &target_hashes[target_index * 32];
-                bool match = true;
-                #pragma unroll 8
-                for (int k = 28; k < 32; k += 4) {
-                    if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match) {
+                // int target_index = d_hash_data[index];
+                // const uint8_t* current_target = &target_hashes[target_index * 32];
+                
+                if (binarySearchHashes(sortedHashes, num_hashes, hash)) {
                     atomicAdd(num_found, 1);
-                    // printf("index: %d, hash_data[index]: %d\n", index, d_hash_data[index]);
-                    break;
-                    // printf("Found password: %s\n", combined);
-                    // int found_idx = atomicAdd(num_found, 1);
+                    return; // Early exit for this thread
                 }
+                // bool match = true;
+                // #pragma unroll 8
+                // for (int k = 28; k < 32; k += 4) {
+                //     if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                //         match = false;
+                //         break;
+                //     }
+                // }
+                // if (match) {
+                //     atomicAdd(num_found, 1);
+                //     // printf("index: %d, hash_data[index]: %d\n", index, d_hash_data[index]);
+                //     break;
+                //     // printf("Found password: %s\n", combined);
+                //     // int found_idx = atomicAdd(num_found, 1);
+                // }
+                index += 1;
+            }
             //     // Get the target hash index from the hash table
             //     int target_index = d_hash_data[index];
             //     const uint8_t* current_target = &target_hashes[target_index * 32];
@@ -302,8 +450,8 @@ __global__ void find_passwords_optimized_multi(
             //     }
             
             //     // Move to the next index in case of a collision
-                index = index + 1;
-            }
+            //     index = index + 1;
+            // }
         }
     }
 }
@@ -360,6 +508,19 @@ int main() {
             hash_index = 0;
             salt_index++;
         }
+    }
+
+    AVLNode* root = insertHashesIntoAVLTree(all_target_hashes);
+    
+    // Flatten the AVL tree into a sorted array
+    std::vector<std::vector<uint8_t>> sortedHashes;
+    inOrderTraversal(root, sortedHashes);
+
+    // Allocate and copy sorted hashes to device
+    uint8_t* d_sortedHashes;
+    cudaMalloc(&d_sortedHashes, sortedHashes.size() * 32 * sizeof(uint8_t));
+    for (size_t i = 0; i < sortedHashes.size(); ++i) {
+        cudaMemcpy(d_sortedHashes + i * 32, sortedHashes[i].data(), 32 * sizeof(uint8_t), cudaMemcpyHostToDevice);
     }
 
 
@@ -444,6 +605,7 @@ int main() {
 
     find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
         d_target_salts,       // Device pointer to the array of salts
+        d_sortedHashes,
         d_target_hashes,      // Device pointer to the array of hashes
         1000,                 // Total number of hashes (10 salts * 100 hashes each)
         d_found_passwords,    // Device pointer to store found passwords
@@ -508,6 +670,7 @@ int main() {
     cudaFree(d_target_salts);
     cudaFree(d_target_hashes);
     cudaFree(d_hash_data);
+    cudaFree(d_sortedHashes);
 
     return 0;
 }
