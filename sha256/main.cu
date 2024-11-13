@@ -330,15 +330,33 @@ __device__ bool binarySearchHashes(const uint8_t* sortedHashes, int num_hashes, 
     return false; // No match found
 }
 
+__device__ bool linearSearchHashes(const uint8_t* sortedHashes, int num_hashes, const uint8_t* targetHash) {
+    bool match = false;
+    for (size_t i = 0; i < num_hashes; i++)
+    {
+        match = true;
+        for (size_t j = 0; j < 32; j++)
+        {
+            if(sortedHashes[i * 32 + j] != targetHash[j]){
+                match = false;
+                break;
+            }
+        }
+        
+        if(match){
+            return true;
+        }
+    }
+    return false;
+}
+    
+
 __global__ void find_passwords_optimized_multi(
     const uint8_t* __restrict__ target_salts,
-    const uint8_t* __restrict__ sortedHashes,
     const uint8_t* __restrict__ target_hashes,
-    int num_hashes,
-    FoundPassword* __restrict__ found_passwords,
+    const uint8_t* __restrict__ sortedHashes,
     int* __restrict__ num_found,
-    const int* __restrict__ d_hash_data,
-    int hash_table_size
+    const int* __restrict__ d_hash_data
 ) {
     __shared__ uint8_t shared_salt[8];
     uint8_t hash[32];
@@ -374,7 +392,7 @@ __global__ void find_passwords_optimized_multi(
             combined[13] = shared_salt[7];
             
             sha256(combined, hash);
-            int index = f2(hash, 8);
+            int index = f2(hash, 6);
 
            
             // Use linear probing to resolve collisions
@@ -383,7 +401,7 @@ __global__ void find_passwords_optimized_multi(
                 // int target_index = d_hash_data[index];
                 // const uint8_t* current_target = &target_hashes[target_index * 32];
                 
-                if (binarySearchHashes(sortedHashes, num_hashes, hash)) {
+                if (linearSearchHashes(sortedHashes, 1000, hash)) {
                     int found_idx = atomicAdd(num_found, 1);
                     // Directly assign characters to the password array
                     // found_passwords[found_idx].password[0] = combined[0];
@@ -423,55 +441,28 @@ __global__ void find_passwords_optimized_multi(
                 // }
                 index += 1;
             }
-            //     // Get the target hash index from the hash table
-            //     int target_index = d_hash_data[index];
-            //     const uint8_t* current_target = &target_hashes[target_index * 32];
             
-            //     // Compare the computed hash with the target hash
-            //     bool match = true;
-            //     #pragma unroll 8
-            //     for (int k = 0; k < 32; k += 4) {
-            //         if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-            //             match = false;
-            //             break;
-            //         }
-            //     }
-            
-            //     if (match) {
-            //         int found_idx = atomicAdd(num_found, 1);
-            //         if (found_idx < MAX_FOUND) {
-            //             // Directly assign characters to the password array
-            //             found_passwords[found_idx].password[0] = combined[0];
-            //             found_passwords[found_idx].password[1] = combined[1];
-            //             found_passwords[found_idx].password[2] = combined[2];
-            //             found_passwords[found_idx].password[3] = combined[3];
-            //             found_passwords[found_idx].password[4] = combined[4];
-            //             found_passwords[found_idx].password[5] = combined[5];
-            //             found_passwords[found_idx].password[6] = '\0'; // Null-terminate the string
-
-            //             // Use a loop to copy the hash and salt, which are larger
-            //             #pragma unroll
-            //             for (int i = 0; i < 32; ++i) {
-            //                 found_passwords[found_idx].hash[i] = hash[i];
-            //             }
-
-            //             #pragma unroll
-            //             for (int i = 0; i < 8; ++i) {
-            //                 found_passwords[found_idx].salt[i] = shared_salt[i];
-            //             }
-            //         }
-            //         break; // Exit loop once a match is found
-            //     }
-            
-            //     // Move to the next index in case of a collision
-            //     index = index + 1;
-            // }
         }
     }
 }
 
 
 
+void printHash(const uint8_t* hash) {
+    for (int i = 0; i < 32; ++i) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
+    }
+    std::cout << std::dec << std::endl; // Switch back to decimal
+}
+
+bool hashExistsInSorted(const uint8_t* hash, const std::vector<std::vector<uint8_t>>& sortedHashes) {
+    for (const auto& sortedHash : sortedHashes) {
+        if (memcmp(hash, sortedHash.data(), 32) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 
 int main() {
@@ -533,10 +524,26 @@ int main() {
     // Allocate and copy sorted hashes to device
     uint8_t* d_sortedHashes;
     cudaMalloc(&d_sortedHashes, sortedHashes.size() * 32 * sizeof(uint8_t));
-    for (size_t i = 0; i < sortedHashes.size(); ++i) {
-        cudaMemcpy(d_sortedHashes + i * 32, sortedHashes[i].data(), 32 * sizeof(uint8_t), cudaMemcpyHostToDevice);
+    // Flatten the sortedHashes into a contiguous array
+    std::vector<uint8_t> flattenedHashes;
+    for (const auto& hash : sortedHashes) {
+        flattenedHashes.insert(flattenedHashes.end(), hash.begin(), hash.end());
     }
 
+    // Copy the entire flattened array to the device
+    cudaMemcpy(d_sortedHashes, flattenedHashes.data(), flattenedHashes.size() * sizeof(uint8_t), cudaMemcpyHostToDevice);
+
+    int missingCount = 0;
+    for (int saltIndex = 0; saltIndex < 10; ++saltIndex) {
+        for (int hashIndex = 0; hashIndex < 100; ++hashIndex) {
+            const uint8_t* targetHash = all_target_hashes[saltIndex][hashIndex];
+            if (!hashExistsInSorted(targetHash, sortedHashes)) {
+                std::cout << "Missing hash: ";
+                printHash(targetHash);
+                ++missingCount;
+            }
+        }
+    }
 
     const int HASH_TABLE_SIZE = 1999997; // Adjusted to accommodate 1000 target hashes
 
@@ -546,7 +553,7 @@ int main() {
     for (int salt_index = 0; salt_index < 10; salt_index++) {
         for (int hash_index = 0; hash_index < 100; hash_index++) {
             // Calculate the hash value for the current hash
-            int index = f(all_target_hashes[salt_index][hash_index], 8);
+            int index = f(all_target_hashes[salt_index][hash_index], 6);
 
             // Use linear probing to resolve collisions
             while (hash_data[index] != -1) {
@@ -619,13 +626,10 @@ int main() {
 
     find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
         d_target_salts,       // Device pointer to the array of salts
-        d_sortedHashes,
         d_target_hashes,      // Device pointer to the array of hashes
-        1000,                 // Total number of hashes (10 salts * 100 hashes each)
-        d_found_passwords,    // Device pointer to store found passwords
+        d_sortedHashes,
         d_num_found,          // Device pointer to store the number of found passwords
-        d_hash_data,          // Device pointer to the hash table data
-        HASH_TABLE_SIZE       // Size of the hash table
+        d_hash_data
     );
 
     cudaError_t err = cudaGetLastError();
