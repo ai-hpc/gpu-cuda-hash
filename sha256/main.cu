@@ -8,6 +8,7 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <cuda_fp16.h>
 
 // Add these color definitions at the top
 #define RED     "\033[31m"
@@ -67,42 +68,114 @@ __device__ void sha256(const uint8_t* __restrict__ data, uint8_t* __restrict__ h
     uint32_t g = 0x1f83d9ab;
     uint32_t h = 0x5be0cd19;
 
-    
+    __align__(4) uint32_t W[64];
+   // Load the first 16 words (unrolled for potential speedup)
+    W[0]  = ((uint32_t)data[0]  << 24) | ((uint32_t)data[1]  << 16) | ((uint32_t)data[2]  << 8) | data[3];
+    W[1]  = ((uint32_t)data[4]  << 24) | ((uint32_t)data[5]  << 16) | ((uint32_t)data[6]  << 8) | data[7];
+    W[2]  = ((uint32_t)data[8]  << 24) | ((uint32_t)data[9]  << 16) | ((uint32_t)data[10] << 8) | data[11];
+    W[3]  = ((uint32_t)data[12] << 24) | ((uint32_t)data[13] << 16) | 0x8000; // Padding starts here
+    W[4]  = 0;
+    W[5]  = 0;
+    W[6]  = 0;
+    W[7]  = 0;
+    W[8]  = 0;
+    W[9]  = 0;
+    W[10] = 0;
+    W[11] = 0;
+    W[12] = 0;
+    W[13] = 0;
+    W[14] = 0;
+    W[15] = 112; // Message length (64 bytes * 8 bits/byte = 512 bits)
 
-    uint32_t W[64];
-    W[0] = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
-    W[1] = ((uint32_t)data[4] << 24) | ((uint32_t)data[5] << 16) | ((uint32_t)data[6] << 8) | data[7];
-    W[2] = ((uint32_t)data[8] << 24) | ((uint32_t)data[9] << 16) | ((uint32_t)data[10] << 8) | data[11];
-    W[3] = ((uint32_t)data[12] << 24) | ((uint32_t)data[13] << 16) | 0x8000;
+    // Message schedule expansion (unrolled with reduced dependencies)
+    #pragma unroll
+    for (int i = 16; i < 64; i += 4) {
+        uint32_t s0_1 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >> 3);
+        uint32_t s1_1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >> 10);
+        W[i] = W[i - 16] + s0_1 + W[i - 7] + s1_1;
 
-    *(uint4*)&W[4] = make_uint4(0, 0, 0, 0);
-    *(uint4*)&W[8] = make_uint4(0, 0, 0, 0);
-    *(uint4*)&W[12] = make_uint4(0, 0, 0, 112);
+        uint32_t s0_2 = rotr(W[i - 14], 7) ^ rotr(W[i - 14], 18) ^ (W[i - 14] >> 3);
+        uint32_t s1_2 = rotr(W[i - 1], 17) ^ rotr(W[i - 1], 19) ^ (W[i - 1] >> 10);
+        W[i + 1] = W[i - 15] + s0_2 + W[i - 6] + s1_2;
 
-    #pragma unroll 48
-    for (int i = 16; i < 64; i++) {
-        uint32_t s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >> 3);
-        uint32_t s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >> 10);
-        W[i] = W[i - 16] + s0 + W[i - 7] + s1;
+        uint32_t s0_3 = rotr(W[i - 13], 7) ^ rotr(W[i - 13], 18) ^ (W[i - 13] >> 3);
+        uint32_t s1_3 = rotr(W[i], 17) ^ rotr(W[i], 19) ^ (W[i] >> 10);
+        W[i + 2] = W[i - 14] + s0_3 + W[i - 5] + s1_3;
+
+        uint32_t s0_4 = rotr(W[i - 12], 7) ^ rotr(W[i - 12], 18) ^ (W[i - 12] >> 3);
+        uint32_t s1_4 = rotr(W[i + 1], 17) ^ rotr(W[i + 1], 19) ^ (W[i + 1] >> 10);
+        W[i + 3] = W[i - 13] + s0_4 + W[i - 4] + s1_4;
     }
 
     #pragma unroll 64
-    for (int i = 0; i < 64; i++) {
-        uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-        uint32_t ch = (e & f) ^ (~e & g);
-        uint32_t temp1 = h + S1 + ch + K[i] + W[i];
-        uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-        uint32_t temp2 = S0 + maj;
-
+    for (int i = 0; i < 64; i += 4) {
+        // Round i
+        uint32_t S1_1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        uint32_t ch_1 = (e & f) ^ (~e & g);
+        uint32_t temp1_1 = h + S1_1 + ch_1 + K[i] + W[i];
+        uint32_t S0_1 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        uint32_t maj_1 = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2_1 = S0_1 + maj_1;
+    
         h = g;
         g = f;
         f = e;
-        e = d + temp1;
+        e = d + temp1_1;
         d = c;
         c = b;
         b = a;
-        a = temp1 + temp2;
+        a = temp1_1 + temp2_1;
+    
+        // Round i + 1
+        uint32_t S1_2 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        uint32_t ch_2 = (e & f) ^ (~e & g);
+        uint32_t temp1_2 = h + S1_2 + ch_2 + K[i + 1] + W[i + 1];
+        uint32_t S0_2 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        uint32_t maj_2 = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2_2 = S0_2 + maj_2;
+    
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1_2;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1_2 + temp2_2;
+    
+        // Round i + 2
+        uint32_t S1_3 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        uint32_t ch_3 = (e & f) ^ (~e & g);
+        uint32_t temp1_3 = h + S1_3 + ch_3 + K[i + 2] + W[i + 2];
+        uint32_t S0_3 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        uint32_t maj_3 = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2_3 = S0_3 + maj_3;
+    
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1_3;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1_3 + temp2_3;
+    
+        // Round i + 3
+        uint32_t S1_4 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        uint32_t ch_4 = (e & f) ^ (~e & g);
+        uint32_t temp1_4 = h + S1_4 + ch_4 + K[i + 3] + W[i + 3];
+        uint32_t S0_4 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        uint32_t maj_4 = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2_4 = S0_4 + maj_4;
+    
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1_4;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1_4 + temp2_4;
     }
 
     // Add the compressed chunk to the current hash value
