@@ -330,27 +330,6 @@ __device__ bool binarySearchHashes(const uint8_t* sortedHashes, int num_hashes, 
     return false; // No match found
 }
 
-__device__ bool linearSearchHashes(const uint8_t* sortedHashes, int num_hashes, const uint8_t* targetHash) {
-    bool match = false;
-    for (size_t i = 0; i < num_hashes; i++)
-    {
-        match = true;
-        for (size_t j = 0; j < 32; j++)
-        {
-            if(sortedHashes[i * 32 + j] != targetHash[j]){
-                match = false;
-                break;
-            }
-        }
-        
-        if(match){
-            return true;
-        }
-    }
-    return false;
-}
-    
-
 __global__ void find_passwords_optimized_multi(
     const uint8_t* __restrict__ target_salts,
     const uint8_t* __restrict__ target_hashes,
@@ -398,11 +377,11 @@ __global__ void find_passwords_optimized_multi(
             // Use linear probing to resolve collisions
             while (d_hash_data[index] != -1) {
 
-                // int target_index = d_hash_data[index];
-                // const uint8_t* current_target = &target_hashes[target_index * 32];
+                int target_index = d_hash_data[index];
+                const uint8_t* current_target = &target_hashes[target_index * 32];
                 
-                if (linearSearchHashes(sortedHashes, 1000, hash)) {
-                    int found_idx = atomicAdd(num_found, 1);
+                // if (binarySearchHashes(sortedHashes, 1000, hash)) {
+                    // int found_idx = atomicAdd(num_found, 1);
                     // Directly assign characters to the password array
                     // found_passwords[found_idx].password[0] = combined[0];
                     // found_passwords[found_idx].password[1] = combined[1];
@@ -422,23 +401,23 @@ __global__ void find_passwords_optimized_multi(
                     // for (int i = 0; i < 8; ++i) {
                     //     found_passwords[found_idx].salt[i] = shared_salt[i];
                     // }
-                    return; // Early exit for this thread
+                    // return; // Early exit for this thread
+                // }
+                bool match = true;
+                #pragma unroll 8
+                for (int k = 28; k < 32; k += 4) {
+                    if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                        match = false;
+                        break;
+                    }
                 }
-                // bool match = true;
-                // #pragma unroll 8
-                // for (int k = 28; k < 32; k += 4) {
-                //     if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-                //         match = false;
-                //         break;
-                //     }
-                // }
-                // if (match) {
-                //     atomicAdd(num_found, 1);
-                //     // printf("index: %d, hash_data[index]: %d\n", index, d_hash_data[index]);
-                //     break;
-                //     // printf("Found password: %s\n", combined);
-                //     // int found_idx = atomicAdd(num_found, 1);
-                // }
+                if (match) {
+                    atomicAdd(num_found, 1);
+                    // printf("index: %d, hash_data[index]: %d\n", index, d_hash_data[index]);
+                    break;
+                    // printf("Found password: %s\n", combined);
+                    // int found_idx = atomicAdd(num_found, 1);
+                }
                 index += 1;
             }
             
@@ -524,14 +503,9 @@ int main() {
     // Allocate and copy sorted hashes to device
     uint8_t* d_sortedHashes;
     cudaMalloc(&d_sortedHashes, sortedHashes.size() * 32 * sizeof(uint8_t));
-    // Flatten the sortedHashes into a contiguous array
-    std::vector<uint8_t> flattenedHashes;
-    for (const auto& hash : sortedHashes) {
-        flattenedHashes.insert(flattenedHashes.end(), hash.begin(), hash.end());
+    for (size_t i = 0; i < sortedHashes.size(); ++i) {
+        cudaMemcpy(d_sortedHashes + i * 32, sortedHashes[i].data(), 32 * sizeof(uint8_t), cudaMemcpyHostToDevice);
     }
-
-    // Copy the entire flattened array to the device
-    cudaMemcpy(d_sortedHashes, flattenedHashes.data(), flattenedHashes.size() * sizeof(uint8_t), cudaMemcpyHostToDevice);
 
     int missingCount = 0;
     for (int saltIndex = 0; saltIndex < 10; ++saltIndex) {
