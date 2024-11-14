@@ -416,6 +416,7 @@ __global__ void find_passwords_optimized_multi(
 
     // Calculate thread position for parallel password generation
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // uint64_t stride = blockDim.x * gridDim.x;
 
     // Iterate over each salt
     for (int salt_idx = 0; salt_idx < 10; ++salt_idx) {
@@ -450,10 +451,10 @@ __global__ void find_passwords_optimized_multi(
             // Use linear probing to resolve collisions
             while (d_hash_data[index] != -1) {
 
-                int target_index = d_hash_data[index];
-                const uint8_t* current_target = &target_hashes[target_index * 32];
+                // int target_index = d_hash_data[index];
+                // const uint8_t* current_target = &target_hashes[target_index * 32];
                 
-                // if (binarySearchHashes(sortedHashes, 1000, hash)) {
+                if (binarySearchHashes(sortedHashes, 1000, hash)) {
                     // int found_idx = atomicAdd(num_found, 1);
                     // Directly assign characters to the password array
                     // found_passwords[found_idx].password[0] = combined[0];
@@ -476,15 +477,15 @@ __global__ void find_passwords_optimized_multi(
                     // }
                     // return; // Early exit for this thread
                 // }
-                bool match = true;
-                #pragma unroll 8
-                for (int k = 28; k < 32; k += 4) {
-                    if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match) {
+                // bool match = true;
+                // #pragma unroll 8
+                // for (int k = 28; k < 32; k += 4) {
+                //     if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                //         match = false;
+                //         break;
+                //     }
+                // }
+                // if (match) {
                     atomicAdd(num_found, 1);
                     // printf("index: %d, hash_data[index]: %d\n", index, d_hash_data[index]);
                     break;
