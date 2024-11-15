@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <cuco/static_map.cuh>
+#include <limits> 
 
 // Add these color definitions at the top
 #define RED     "\033[31m"
@@ -54,21 +55,26 @@ struct HashKey {
     uint8_t hash[32];
 
     __host__ __device__ bool operator==(const HashKey& other) const {
-        return std::memcmp(hash, hash + 32, other.hash);
+        return std::memcmp(hash, other.hash, 32) == 0; 
     }
-}
+};
 
+// Define a custom hash function for the key
 struct HashKeyHash {
     __host__ __device__ size_t operator()(const HashKey& key) const {
         size_t result = 0;
         for (int i = 0; i < 32; ++i) {
-            result = result * 31 + key.hash[i];
+            result = result * 31 + key.hash[i]; 
         }
         return result;
     }
 };
 
-using HashTable = cuco::static_map<HashKey, int, HashKeyHash>;
+// Define the key and value types
+using KeyType = HashKey; // Assuming HashKey is your key type
+using ValueType = int;   // Assuming you store indices or some other integer value
+
+
 
 // Right rotate function
 __device__ __forceinline__ uint32_t rotr(uint32_t x, uint32_t n) {
@@ -429,8 +435,7 @@ __global__ void find_passwords_optimized_multi(
     const uint8_t* __restrict__ target_hashes,
     const uint8_t* __restrict__ sortedHashes,
     int* __restrict__ num_found,
-    const int* __restrict__ d_hash_data,
-    HashTable precomputedHashes
+    const int* __restrict__ d_hash_data
 ) {
     __shared__ uint8_t shared_salt[8];
     uint8_t hash[32];
@@ -467,63 +472,55 @@ __global__ void find_passwords_optimized_multi(
             combined[13] = shared_salt[7];
             
             sha256(combined, hash);
-            // int index = f2(hash, 6);
-            HashKey key;
-            std::memcpy(key.hash, hash, 32);
-
-            auto it = precomputedHashes.find(key);
-            if (it != precomputedHashes.end()) {
-                int passwordIndex = it->second;
-                atomicAdd(num_found, 1);
-            }
+            int index = f2(hash, 6);
 
            
-            // // Use linear probing to resolve collisions
-            // while (d_hash_data[index] != -1) {
+            // Use linear probing to resolve collisions
+            while (d_hash_data[index] != -1) {
 
-            //     // int target_index = d_hash_data[index];
-            //     // const uint8_t* current_target = &target_hashes[target_index * 32];
+                // int target_index = d_hash_data[index];
+                // const uint8_t* current_target = &target_hashes[target_index * 32];
                 
-            //     if (binarySearchHashes(sortedHashes, 1000, hash)) {
-            //         // int found_idx = atomicAdd(num_found, 1);
-            //         // Directly assign characters to the password array
-            //         // found_passwords[found_idx].password[0] = combined[0];
-            //         // found_passwords[found_idx].password[1] = combined[1];
-            //         // found_passwords[found_idx].password[2] = combined[2];
-            //         // found_passwords[found_idx].password[3] = combined[3];
-            //         // found_passwords[found_idx].password[4] = combined[4];
-            //         // found_passwords[found_idx].password[5] = combined[5];
-            //         // found_passwords[found_idx].password[6] = '\0'; // Null-terminate the string
+                if (binarySearchHashes(sortedHashes, 1000, hash)) {
+                    // int found_idx = atomicAdd(num_found, 1);
+                    // Directly assign characters to the password array
+                    // found_passwords[found_idx].password[0] = combined[0];
+                    // found_passwords[found_idx].password[1] = combined[1];
+                    // found_passwords[found_idx].password[2] = combined[2];
+                    // found_passwords[found_idx].password[3] = combined[3];
+                    // found_passwords[found_idx].password[4] = combined[4];
+                    // found_passwords[found_idx].password[5] = combined[5];
+                    // found_passwords[found_idx].password[6] = '\0'; // Null-terminate the string
 
-            //         // // Use a loop to copy the hash and salt, which are larger
-            //         // #pragma unroll
-            //         // for (int i = 0; i < 32; ++i) {
-            //         //     found_passwords[found_idx].hash[i] = hash[i];
-            //         // }
+                    // // Use a loop to copy the hash and salt, which are larger
+                    // #pragma unroll
+                    // for (int i = 0; i < 32; ++i) {
+                    //     found_passwords[found_idx].hash[i] = hash[i];
+                    // }
 
-            //         // #pragma unroll
-            //         // for (int i = 0; i < 8; ++i) {
-            //         //     found_passwords[found_idx].salt[i] = shared_salt[i];
-            //         // }
-            //         // return; // Early exit for this thread
-            //     // }
-            //     // bool match = true;
-            //     // #pragma unroll 8
-            //     // for (int k = 28; k < 32; k += 4) {
-            //     //     if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
-            //     //         match = false;
-            //     //         break;
-            //     //     }
-            //     // }
-            //     // if (match) {
-            //         atomicAdd(num_found, 1);
-            //         // printf("index: %d, hash_data[index]: %d\n", index, d_hash_data[index]);
-            //         break;
-            //         // printf("Found password: %s\n", combined);
-            //         // int found_idx = atomicAdd(num_found, 1);
-            //     }
-            //     index += 1;
-            // }
+                    // #pragma unroll
+                    // for (int i = 0; i < 8; ++i) {
+                    //     found_passwords[found_idx].salt[i] = shared_salt[i];
+                    // }
+                    // return; // Early exit for this thread
+                // }
+                // bool match = true;
+                // #pragma unroll 8
+                // for (int k = 28; k < 32; k += 4) {
+                //     if (*(uint32_t*)&hash[k] != *(uint32_t*)&current_target[k]) {
+                //         match = false;
+                //         break;
+                //     }
+                // }
+                // if (match) {
+                    atomicAdd(num_found, 1);
+                    // printf("index: %d, hash_data[index]: %d\n", index, d_hash_data[index]);
+                    break;
+                    // printf("Found password: %s\n", combined);
+                    // int found_idx = atomicAdd(num_found, 1);
+                }
+                index += 1;
+            }
             
         }
     }
@@ -604,15 +601,10 @@ int main() {
     std::vector<std::vector<uint8_t>> sortedHashes;
     inOrderTraversal(root, sortedHashes);
 
-    HashTable hostHashTable;
-    int index = 0;
-    for (const auto& hash : sortedHashesVector) {
-        HashKey key;
-        std::memcpy(key.hash, hash.data(), 32);
-        hostHashTable.insert(std::make_pair(key, index++)); 
-    }
+    
+    // // Initialize the hash table
+    // cuco::static_map<KeyType, ValueType> hash_table(1000, -1); // Example capacity and default value
 
-    HashTable deviceHashTable = hostHashTable;
 
     // Allocate and copy sorted hashes to device
     uint8_t* d_sortedHashes;
@@ -717,8 +709,7 @@ int main() {
         d_target_hashes,      // Device pointer to the array of hashes
         d_sortedHashes,
         d_num_found,          // Device pointer to store the number of found passwords
-        d_hash_data,
-        deviceHashTable
+        d_hash_data
     );
 
     cudaError_t err = cudaGetLastError();
