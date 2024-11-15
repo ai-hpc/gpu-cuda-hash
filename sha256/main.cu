@@ -10,7 +10,12 @@
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <cuco/static_map.cuh>
-#include <limits> 
+#include <cuda/functional>
+#include <thrust/device_vector.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
+#include <thrust/logical.h>
+#include <thrust/transform.h>
 
 // Add these color definitions at the top
 #define RED     "\033[31m"
@@ -602,9 +607,17 @@ int main() {
     inOrderTraversal(root, sortedHashes);
 
     
-    // // Initialize the hash table
-    // cuco::static_map<KeyType, ValueType> hash_table(1000, -1); // Example capacity and default value
+    // Define empty key and value
+    KeyType empty_key = {/* initialize with a value that represents an empty key */};
+    ValueType empty_value = -1; // Assuming -1 is a suitable empty value for your use case
 
+    // Initialize the hash table with a capacity of 1000
+    cuco::static_map<KeyType, ValueType> hash_table(
+        1000,             // Capacity
+        empty_key,        // Empty key
+        empty_value       // Empty value
+        // You may need to provide additional parameters based on your use case
+    );
 
     // Allocate and copy sorted hashes to device
     uint8_t* d_sortedHashes;
