@@ -75,8 +75,17 @@ int main(void) {
                                 custom_key_equal{},
                                 cuco::linear_probing<1, custom_hash>{}};
 
-    // Inserts 80,000 pairs into the map
-    map.insert(pairs_begin, pairs_begin + num_pairs);
+    uint8_t data[32];
+    for (int j = 0; j < 32; ++j) {
+        data[j] = static_cast<uint8_t>(55 & 0xFF);
+    }
+
+    // Create device vector with single pair
+    thrust::device_vector<cuco::pair<custom_key_type, custom_value_type>> d_pairs(1);
+    d_pairs[0] = cuco::pair{custom_key_type(data, 32), custom_value_type(data, 32)};
+
+    // Insert single element using device vector of pairs
+    map.insert(d_pairs.begin(), d_pairs.end());
 
     // Prepare to find the key associated with the value 55
     uint8_t search_data[32];
