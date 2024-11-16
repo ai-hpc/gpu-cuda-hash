@@ -1,84 +1,82 @@
 #include <cuco/static_map.cuh>
-#include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
+#include <thrust/logical.h>
+#include <thrust/transform.h>
 #include <iostream>
-#include <fstream>
-#include <string>
-#include <vector>
-#include <array>
 
-// Define a custom key type using a uint8_t array of size 32
-struct CustomKey {
-  std::array<uint8_t, 32> data;
+// User-defined key type
+struct custom_key_type {
+    int32_t a;
+    int32_t b;
 
-  __host__ __device__ CustomKey() : data{} {}
-  __host__ __device__ CustomKey(const std::array<uint8_t, 32>& arr) : data(arr) {}
-
-  // Equality operator
-  __host__ __device__ bool operator==(const CustomKey& other) const {
-    for (size_t i = 0; i < 32; ++i) {
-      if (data[i] != other.data[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
+    __host__ __device__ custom_key_type() {}
+    __host__ __device__ custom_key_type(int32_t x) : a{x}, b{x} {}
 };
 
-// Custom hash function for CustomKey
-struct custom_key_hash {
-  __device__ uint32_t operator()(CustomKey const& key) const noexcept {
-    // Simple hash function example: sum of all bytes
-    uint32_t hash = 0;
-    for (auto byte : key.data) {
-      hash = hash * 31 + byte;
-    }
-    return hash;
-  }
+// User-defined value type
+struct custom_value_type {
+    int32_t f;
+    int32_t s;
+
+    __host__ __device__ custom_value_type() {}
+    __host__ __device__ custom_value_type(int32_t x) : f{x}, s{x} {}
 };
 
-// Custom equality function for CustomKey
+// User-defined device hash callable
+struct custom_hash {
+    __device__ uint32_t operator()(custom_key_type const& k) const noexcept { return k.a; }
+};
+
+// User-defined device key equal callable
 struct custom_key_equal {
-  __device__ bool operator()(CustomKey const& lhs, CustomKey const& rhs) const noexcept {
-    return lhs == rhs;
-  }
+    __device__ bool operator()(custom_key_type const& lhs, custom_key_type const& rhs) const noexcept {
+        return lhs.a == rhs.a;
+    }
 };
 
-constexpr cuco::empty_key<CustomKey> empty_key_sentinel{CustomKey{{0xFF}}}; // Use a unique sentinel
-constexpr cuco::empty_value<int> empty_value_sentinel{-1};
+int main(void) {
+    constexpr std::size_t num_pairs = 80'000;
 
-// Function to convert hex string to bytes
-void hexToBytes(const char* hex, uint8_t* bytes) {
-  for (size_t i = 0; i < 32; ++i) {
-    sscanf(hex + 2 * i, "%2hhx", &bytes[i]);
-  }
-}
+    // Set empty sentinels
+    auto const empty_key_sentinel = custom_key_type{-1};
+    auto const empty_value_sentinel = custom_value_type{-1};
 
-int main() {
-  // Create a static map using the custom key type
-  cuco::static_map<CustomKey, int, custom_key_equal, custom_key_hash> map(
-      1000,                      // Capacity
-      empty_key_sentinel,        // Empty key sentinel
-      empty_value_sentinel,      // Empty value sentinel
-      custom_key_equal{},        // Key equality comparator
-      cuco::linear_probing<4, custom_key_hash>{}, // Probing scheme
-      cuco::cuda_allocator<cuco::pair<CustomKey, int>>{}, // Allocator
-      cuco::storage{}            // Storage
-  );
+    // Create an iterator of input key/value pairs
+    auto pairs_begin = thrust::make_transform_iterator(
+        thrust::make_counting_iterator<int32_t>(0),
+        cuda::proclaim_return_type<cuco::pair<custom_key_type, custom_value_type>>(
+            [] __device__(auto i) { return cuco::pair{custom_key_type{i}, custom_value_type{i}}; }));
 
-  // Example usage: insert and find
-  CustomKey key1;
-  hexToBytes("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", key1.data.data());
-  map.insert(std::make_pair(key1, 42));
+    // Construct a map with 100,000 slots using the given empty key/value sentinels.
+    auto map = cuco::static_map{cuco::extent<std::size_t, 100'000>{},
+                                cuco::empty_key{empty_key_sentinel},
+                                cuco::empty_value{empty_value_sentinel},
+                                custom_key_equal{},
+                                cuco::linear_probing<1, custom_hash>{}};
 
-  int value;
-  bool found = map.find(key1, value);
+    // Inserts 80,000 pairs into the map
+    map.insert(pairs_begin, pairs_begin + num_pairs);
 
-  if (found) {
-    std::cout << "Key found with value: " << value << std::endl;
-  } else {
-    std::cout << "Key not found." << std::endl;
-  }
+    // Prepare to find the key associated with the value 55
+    thrust::device_vector<custom_key_type> search_keys(1, custom_key_type{55});
+    thrust::device_vector<custom_value_type> found_values(1, empty_value_sentinel);
 
-  return 0;
+    // Use the find method to locate the key-value pair
+    map.find(search_keys.begin(), search_keys.end(), found_values.begin());
+
+    // Copy the found key from device to host
+    custom_key_type host_key = search_keys[0];
+    custom_value_type host_value = found_values[0];
+
+    // Check if the value was found
+    if (host_value.f == 55) {
+        std::cout << "Found key with value 55: (" << host_key.a << ", " << host_key.b << ")\n";
+    } else {
+        std::cout << "Key with value 55 not found.\n";
+    }
+
+    return 0;
 }
