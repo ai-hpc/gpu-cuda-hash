@@ -103,12 +103,22 @@ int main(void) {
     thrust::device_vector<cuco::pair<custom_key_type, custom_value_type>> d_pairs(1000);
 
     // Initialize 100 pairs with values 1-100
-    for (int i = 1; i <= 1000; i++) {
-        uint8_t data[32];
-        for (int j = 0; j < 32; ++j) {
-            data[j] = static_cast<uint8_t>(i & 0xFF);
-        }
-        d_pairs[i-1] = cuco::pair{custom_key_type(data, 32), custom_value_type(data, 32)};
+    // for (int i = 1; i <= 1000; i++) {
+    //     uint8_t data[32];
+    //     for (int j = 0; j < 32; ++j) {
+    //         data[j] = static_cast<uint8_t>(i & 0xFF);
+    //     }
+    //     d_pairs[i-1] = cuco::pair{custom_key_type(data, 32), custom_value_type(data, 32)};
+    // }
+
+    for (int i = 0; i < 10; i++) {
+        for (int j = 0; j < 100; j++) {
+            uint8_t data[32];
+            for (int k = 0; k < 32; ++k) {
+                data[k] = all_target_hashes[i][j][k];
+            }
+            d_pairs[i*100+j] = cuco::pair{custom_key_type(data, 32), custom_value_type(data, 32)};
+        } 
     }
 
     // Insert all 100 pairs
@@ -117,7 +127,7 @@ int main(void) {
     // Prepare to find the key associated with the value 55
     uint8_t search_data[32];
     for (int j = 0; j < 32; ++j) {
-        search_data[j] = 222; // Fill with the byte value 55
+        search_data[j] = all_target_hashes[6][88][j]; // Fill with the byte value 55
     }
     thrust::device_vector<custom_key_type> search_keys(1, custom_key_type(search_data, 32));
     thrust::device_vector<custom_value_type> found_values(1, empty_value_sentinel);
@@ -131,9 +141,9 @@ int main(void) {
 
     // Check if the value was found
     if (host_value.hash == custom_value_type(search_data, 32).hash) {
-        std::cout << "Found key with value 799: (" << host_key.hash << ")\n";
+        std::cout << "Found key with value: (" << host_key.hash << ")\n";
     } else {
-        std::cout << "Key with value 799 not found.\n";
+        std::cout << "Key with value not found.\n";
     }
 
     return 0;
