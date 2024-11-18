@@ -1,10 +1,7 @@
 #include <cuco/static_map.cuh>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
-#include <thrust/iterator/counting_iterator.h>
-#include <thrust/iterator/transform_iterator.h>
-#include <thrust/logical.h>
-#include <thrust/transform.h>
+#include <thrust/sequence.h>
 #include <iostream>
 #include <fstream>
 
@@ -19,6 +16,10 @@ struct custom_key_type {
         for (size_t i = 0; i < size; ++i) {
             hash = hash * 31 + data[i]; // Simple hash function example
         }
+    }
+
+    __host__ __device__ bool operator==(const custom_key_type& other) const {
+        return hash == other.hash;
     }
 };
 
@@ -57,14 +58,26 @@ void hexToBytes(const char* hex, uint8_t* bytes) {
     }
 }
 
-int main(void) {
+// Global kernel to iterate over keys and use the device function
+template <typename Map, typename KeyIter, typename ValueIter>
+__global__ void example_kernel(Map map_ref, KeyIter key_begin, ValueIter value_begin, std::size_t num_keys) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num_keys) {
+        // Example operation: find a key and update its value
+        auto result = map_ref.find(key_begin[idx]);
+        if (result != map_ref.end()) {
+            result->second = value_begin[idx]; // Update the value
+        }
+    }
+}
 
+int main() {
     uint8_t all_target_hashes[10][100][32]; // 10 salts, each with 100 hashes
     uint8_t all_target_salts[10][8];        // 10 unique salts
 
     std::ifstream infile("in.txt");
     if (!infile) {
-        printf("Error: Unable to open file in.txt\n");
+        std::cerr << "Error: Unable to open file in.txt\n";
         return 1;
     }
 
@@ -87,29 +100,21 @@ int main(void) {
         }
     }
 
-
-      // Set empty sentinels
+    // Set empty sentinels
     auto const empty_key_sentinel = custom_key_type{};
     auto const empty_value_sentinel = custom_value_type{};
 
     // Construct a map with 100,000 slots using the given empty key/value sentinels.
-    auto map = cuco::static_map{cuco::extent<std::size_t, 100'000>{},
-                                cuco::empty_key{empty_key_sentinel},
-                                cuco::empty_value{empty_value_sentinel},
-                                custom_key_equal{},
-                                cuco::linear_probing<1, custom_hash>{}};
+    auto h_map = cuco::static_map<custom_key_type, custom_value_type, custom_key_equal, custom_hash>{
+        cuco::extent<std::size_t, 100'000>{},
+        cuco::empty_key{empty_key_sentinel},
+        cuco::empty_value{empty_value_sentinel},
+        custom_key_equal{},
+        cuco::linear_probing<1, custom_hash>{}
+    };
 
-    // Create device vector for 100 pairs
+    // Create device vector for 1000 pairs
     thrust::device_vector<cuco::pair<custom_key_type, custom_value_type>> d_pairs(1000);
-
-    // Initialize 100 pairs with values 1-100
-    // for (int i = 1; i <= 1000; i++) {
-    //     uint8_t data[32];
-    //     for (int j = 0; j < 32; ++j) {
-    //         data[j] = static_cast<uint8_t>(i & 0xFF);
-    //     }
-    //     d_pairs[i-1] = cuco::pair{custom_key_type(data, 32), custom_value_type(data, 32)};
-    // }
 
     for (int i = 0; i < 10; i++) {
         for (int j = 0; j < 100; j++) {
@@ -117,12 +122,12 @@ int main(void) {
             for (int k = 0; k < 32; ++k) {
                 data[k] = all_target_hashes[i][j][k];
             }
-            d_pairs[i*100+j] = cuco::pair{custom_key_type(data, 32), custom_value_type(data, 32)};
-        } 
+            d_pairs[i * 100 + j] = cuco::pair{custom_key_type(data, 32), custom_value_type(data, 32)};
+        }
     }
 
-    // Insert all 100 pairs
-    map.insert(d_pairs.begin(), d_pairs.end());
+    // Insert all 1000 pairs
+    h_map.insert(d_pairs.begin(), d_pairs.end());
 
     // Prepare to find the key associated with the value 55
     uint8_t search_data[32];
@@ -132,18 +137,23 @@ int main(void) {
     thrust::device_vector<custom_key_type> search_keys(1, custom_key_type(search_data, 32));
     thrust::device_vector<custom_value_type> found_values(1, empty_value_sentinel);
 
-    // Use the find method to locate the key-value pair
-    map.find(search_keys.begin(), search_keys.end(), found_values.begin());
+    // Get a reference for device operations
+    auto map_ref = h_map.ref();
 
-    // Copy the found key from device to host
-    custom_key_type host_key = search_keys[0];
-    custom_value_type host_value = found_values[0];
+    // Define grid and block dimensions
+    int threads_per_block = 256;
+    int num_keys = search_keys.size();
+    int num_blocks = (num_keys + threads_per_block - 1) / threads_per_block;
 
-    // Check if the value was found
-    if (host_value.hash == custom_value_type(search_data, 32).hash) {
-        std::cout << "Found key with value: (" << host_key.hash << ")\n";
-    } else {
-        std::cout << "Key with value not found.\n";
+    // Launch the kernel
+    example_kernel<<<num_blocks, threads_per_block>>>(map_ref, search_keys.begin(), found_values.begin(), num_keys);
+
+    // Copy results back to host if needed
+    thrust::host_vector<custom_value_type> h_values = found_values;
+
+    // Output results or perform further processing
+    for (std::size_t i = 0; i < search_keys.size(); ++i) {
+        std::cout << "Key: " << search_keys[i].hash << ", Value: " << h_values[i].hash << std::endl;
     }
 
     return 0;
