@@ -9,13 +9,6 @@
 #include <unordered_map>
 #include <cstdint>
 #include <cuda_fp16.h>
-#include <cuco/static_map.cuh>
-#include <cuda/functional>
-#include <thrust/device_vector.h>
-#include <thrust/iterator/counting_iterator.h>
-#include <thrust/iterator/transform_iterator.h>
-#include <thrust/logical.h>
-#include <thrust/transform.h>
 
 // Add these color definitions at the top
 #define RED     "\033[31m"
@@ -55,30 +48,6 @@ struct FoundPassword {
     uint8_t hash[32];
     uint8_t salt[8];
 };
-
-struct HashKey {
-    uint8_t hash[32];
-
-    __host__ __device__ bool operator==(const HashKey& other) const {
-        return std::memcmp(hash, other.hash, 32) == 0; 
-    }
-};
-
-// Define a custom hash function for the key
-struct HashKeyHash {
-    __host__ __device__ size_t operator()(const HashKey& key) const {
-        size_t result = 0;
-        for (int i = 0; i < 32; ++i) {
-            result = result * 31 + key.hash[i]; 
-        }
-        return result;
-    }
-};
-
-// Define the key and value types
-using KeyType = HashKey; // Assuming HashKey is your key type
-using ValueType = int;   // Assuming you store indices or some other integer value
-
 
 
 // Right rotate function
@@ -606,18 +575,7 @@ int main() {
     std::vector<std::vector<uint8_t>> sortedHashes;
     inOrderTraversal(root, sortedHashes);
 
-    
-    // Define empty key and value
-    KeyType empty_key = {/* initialize with a value that represents an empty key */};
-    ValueType empty_value = -1; // Assuming -1 is a suitable empty value for your use case
 
-    // Initialize the hash table with a capacity of 1000
-    cuco::static_map<KeyType, ValueType> hash_table(
-        1000,             // Capacity
-        empty_key,        // Empty key
-        empty_value       // Empty value
-        // You may need to provide additional parameters based on your use case
-    );
 
     // Allocate and copy sorted hashes to device
     uint8_t* d_sortedHashes;
