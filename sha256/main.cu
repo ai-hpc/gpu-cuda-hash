@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <cstdint>
 #include <cuda_fp16.h>
+#include <omp.h>
+#include <immintrin.h>
 
 #define MAX_FOUND 1000
 #define NUM_STREAMS 10  // One stream per salt
@@ -229,6 +231,15 @@ __device__ void sha256(const uint8_t* __restrict__ data, uint8_t* __restrict__ h
     hash[29] = h >> 16;
     hash[30] = h >> 8;
     hash[31] = h;
+}
+
+__device__ __host__ bool fastHashCompare(const uint8_t* hash1, const uint8_t* hash2) {
+    // Use SIMD for faster comparison
+    __m256i* vec1 = (__m256i*)hash1;
+    __m256i* vec2 = (__m256i*)hash2;
+    
+    __m256i cmp = _mm256_cmpeq_epi8(*vec1, *vec2);
+    return _mm256_movemask_epi8(cmp) == 0xFFFFFFFF;
 }
 
 
@@ -536,6 +547,7 @@ int main() {
     const int HASH_TABLE_SIZE = 1999997; // Adjusted to accommodate 1000 target hashes
 
     std::vector<std::vector<int>> hash_data_streams(NUM_STREAMS);
+    #pragma omp parallel for
     for (int salt_index = 0; salt_index < NUM_STREAMS; salt_index++) {
         // Create a hash table for each salt's 100 hashes
         hash_data_streams[salt_index].resize(HASH_TABLE_SIZE, -1);
