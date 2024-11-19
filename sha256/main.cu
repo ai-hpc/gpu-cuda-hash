@@ -399,58 +399,52 @@ __global__ void find_passwords_optimized_multi(
     const uint8_t* __restrict__ target_hashes,
     const uint8_t* __restrict__ sortedHashes,
     int* __restrict__ num_found,
-    const int* __restrict__ d_hash_data
+    const int* __restrict__ d_hash_data,
+    int salt_index  // New parameter to specify which salt this kernel handles
 ) {
     __shared__ uint8_t shared_salt[8];
     uint8_t hash[32];
     uint8_t combined[14];
 
+    // Load the salt into shared memory
+    if (threadIdx.x < 8) {
+        shared_salt[threadIdx.x] = target_salts[threadIdx.x];
+    }
+
+    __syncthreads();
+
     // Calculate thread position for parallel password generation
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    // uint64_t stride = blockDim.x * gridDim.x;
 
-    // Iterate over each salt
-    for (int salt_idx = 0; salt_idx < 10; ++salt_idx) {
-        // Load the current salt into shared memory
-        if (threadIdx.x < 8) {
-            shared_salt[threadIdx.x] = target_salts[salt_idx * 8 + threadIdx.x];
-        }
+    // Process multiple passwords per thread
+    for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += blockDim.x * gridDim.x) {
+        uint64_t idx = password_idx;
 
-        __syncthreads();
+        #pragma unroll
+        for (int i = 0; i < 6; ++i) {
+            combined[i] = charset[idx % 62];
+            combined[6 + i] = shared_salt[i];
+            idx = static_cast<uint64_t>(idx * reciprocal); // Approximate division by 62
+        }       
         
-        // Process multiple passwords per thread using stride
-        for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += 1572864) {
-            uint64_t idx = password_idx;
+        // Use shared memory for salt
+        combined[12] = shared_salt[6];
+        combined[13] = shared_salt[7];
+        
+        sha256(combined, hash);
+        int index = f2(hash, 6);
 
-            #pragma unroll
-            for (int i = 0; i < 6; ++i) {
-                combined[i] = charset[idx % 62];
-                combined[6 + i] = shared_salt[i];
-                idx = static_cast<uint64_t>(idx * reciprocal); // Approximate division by 62
-            }       
-            // Use shared memory for salt
-            combined[12] = shared_salt[6];
-            combined[13] = shared_salt[7];
-            
-            sha256(combined, hash);
-            int index = f2(hash, 6);
-
-            // Use linear probing to resolve collisions
-            while (d_hash_data[index] != -1) {
-
-                // int target_index = d_hash_data[index];
-                // const uint8_t* current_target = &target_hashes[target_index * 32];
-                
-                if (binarySearchHashes(sortedHashes, 1000, hash)) {
-                    atomicAdd(num_found, 1);
-                    break;
-                }
-                index += 1;
+        // Use linear probing to resolve collisions
+        while (d_hash_data[index] != -1) {
+            if (binarySearchHashes(sortedHashes, 100, hash)) {
+                atomicAdd(num_found, 1);
+                break;
             }
-            
+            index += 1;
         }
     }
 }
+
 
 
 
@@ -588,49 +582,66 @@ int main() {
                         cudaMemcpyHostToDevice, 
                         streams[i]);
                         
-        for (size_t j = 0; j < saltSpecificSortedHashes.size(); ++j) {
-            cudaMemcpyAsync(d_sorted_hashes_streams[i] + j * 32, 
-                            saltSpecificSortedHashes[j].data(), 
-                            32 * sizeof(uint8_t), 
-                            cudaMemcpyHostToDevice, 
+        for (size_t j = 0; j < saltSpecificSortedHashes[i].size(); ++j) {
+            cudaMemcpyAsync(d_sorted_hashes_streams[i] + j * 32,
+                            saltSpecificSortedHashes[i][j].data(),
+                            32 * sizeof(uint8_t),
+                            cudaMemcpyHostToDevice,
                             streams[i]);
         }
 
         // Initialize found passwords counter to zero
         cudaMemsetAsync(d_num_found_streams[i], 0, sizeof(int), streams[i]);
     }
+    printf("Debugging\n");
+    for (int salt_index = 0; salt_index < 10; ++salt_index) {
+        std::cout << "Sorted Hashes for Salt " << salt_index << ":" << std::endl;
+        for (size_t hash_index = 0; hash_index < saltSpecificSortedHashes[salt_index].size(); ++hash_index) {
+            std::cout << "Hash " << hash_index << ": ";
+            printHash(saltSpecificSortedHashes[salt_index][hash_index].data());
+        }
+        std::cout << "Total hashes for this salt: " 
+                  << saltSpecificSortedHashes[salt_index].size() << std::endl;
+        std::cout << "-------------------" << std::endl;
+    }
     
 
 
 
-    // // Determine the number of threads per block
-    // int blockSize = 512; // Choose a block size that is a multiple of the warp size
+    // Determine the number of threads per block
+    int blockSize = 512; // Choose a block size that is a multiple of the warp size
 
-    // // Calculate the total number of threads needed
-    // uint64_t totalThreads = total_passwords;
+    // Calculate the total number of threads needed
+    uint64_t totalThreads = total_passwords;
 
-    // // Calculate the number of blocks needed to cover all threads
-    // int numBlocks = (totalThreads + blockSize - 1) / blockSize;
+    // Calculate the number of blocks needed to cover all threads
+    int numBlocks = (totalThreads + blockSize - 1) / blockSize;
 
-    // // Ensure the number of blocks does not exceed the maximum allowed by the device
-    // numBlocks = min(numBlocks, numSMs * maxBlocksPerSM);
+    // Ensure the number of blocks does not exceed the maximum allowed by the device
+    numBlocks = 3072;
 
-    // // printf("Kernel configuration:\n");
-    // // printf("- Block size: %d\n", blockSize);
-    // // printf("- Number of blocks: %d\n", numBlocks);
+    // printf("Kernel configuration:\n");
+    // printf("- Block size: %d\n", blockSize);
+    // printf("- Number of blocks: %d\n", numBlocks);
 
     // cudaEvent_t start, stop;
     // cudaEventCreate(&start);
     // cudaEventCreate(&stop);
     // cudaEventRecord(start);
 
-    // find_passwords_optimized_multi<<<numBlocks, blockSize>>>(
-    //     d_target_salts,       // Device pointer to the array of salts
-    //     d_target_hashes,      // Device pointer to the array of hashes
-    //     d_sortedHashes,
-    //     d_num_found,          // Device pointer to store the number of found passwords
-    //     d_hash_data
-    // );
+    // Launch kernels on different streams
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
+            d_target_salts_streams[i],       // Device pointer to the specific salt
+            d_target_hashes_streams[i],      // Device pointer to the specific hashes
+            d_sorted_hashes_streams[i],      // Device pointer to the specific sorted hashes
+            d_num_found_streams[i],          // Device pointer to store the number of found passwords
+            d_hash_data_streams[i],          // Device pointer to the specific hash data
+            i                                // Salt index
+        );
+    }
+
+
 
     // cudaError_t err = cudaGetLastError();
     // if (err != cudaSuccess) {
