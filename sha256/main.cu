@@ -13,6 +13,15 @@
 #define MAX_FOUND 1000
 #define NUM_STREAMS 10  // One stream per salt
 
+#define RED     "\033[31m"
+#define GREEN   "\033[32m"
+#define YELLOW  "\033[33m"
+#define BLUE    "\033[34m"
+#define MAGENTA "\033[35m"
+#define CYAN    "\033[36m"
+#define RESET   "\033[0m"
+#define BOLD    "\033[1m"
+
 
 __constant__ const unsigned long long total_passwords = 62ULL * 62 * 62 * 62 * 62 * 62;
 __constant__ char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -415,9 +424,9 @@ __global__ void find_passwords_optimized_multi(
 
     // Calculate thread position for parallel password generation
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-
+    uint64_t stride = blockDim.x * gridDim.x;
     // Process multiple passwords per thread
-    for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += blockDim.x * gridDim.x) {
+    for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += stride) {
         uint64_t idx = password_idx;
 
         #pragma unroll
@@ -593,20 +602,6 @@ int main() {
         // Initialize found passwords counter to zero
         cudaMemsetAsync(d_num_found_streams[i], 0, sizeof(int), streams[i]);
     }
-    printf("Debugging\n");
-    for (int salt_index = 0; salt_index < 10; ++salt_index) {
-        std::cout << "Sorted Hashes for Salt " << salt_index << ":" << std::endl;
-        for (size_t hash_index = 0; hash_index < saltSpecificSortedHashes[salt_index].size(); ++hash_index) {
-            std::cout << "Hash " << hash_index << ": ";
-            printHash(saltSpecificSortedHashes[salt_index][hash_index].data());
-        }
-        std::cout << "Total hashes for this salt: " 
-                  << saltSpecificSortedHashes[salt_index].size() << std::endl;
-        std::cout << "-------------------" << std::endl;
-    }
-    
-
-
 
     // Determine the number of threads per block
     int blockSize = 512; // Choose a block size that is a multiple of the warp size
@@ -624,12 +619,14 @@ int main() {
     // printf("- Block size: %d\n", blockSize);
     // printf("- Number of blocks: %d\n", numBlocks);
 
-    // cudaEvent_t start, stop;
-    // cudaEventCreate(&start);
-    // cudaEventCreate(&stop);
-    // cudaEventRecord(start);
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
 
     // Launch kernels on different streams
+    #pragma unroll
     for (int i = 0; i < NUM_STREAMS; ++i) {
         find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
             d_target_salts_streams[i],       // Device pointer to the specific salt
@@ -641,28 +638,37 @@ int main() {
         );
     }
 
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
 
-
-    // cudaError_t err = cudaGetLastError();
-    // if (err != cudaSuccess) {
-    //     printf("CUDA Error: %s\n", cudaGetErrorString(err));
-    // }
-
-    // cudaEventRecord(stop);
-    // cudaEventSynchronize(stop);
-    // float gpu_time_ms;
-    // cudaEventElapsedTime(&gpu_time_ms, start, stop);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float gpu_time_ms;
+    cudaEventElapsedTime(&gpu_time_ms, start, stop);
     
-    // cudaDeviceSynchronize();
+    printf(BOLD CYAN "\nPerformance Metrics:\n" RESET);
+    printf(YELLOW "GPU Time: " RESET "%.2f ms\n", gpu_time_ms);
+    
+    int h_num_found = 0;
 
+    // Aggregate results from all streams
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        int stream_found = 0;
+        cudaMemcpyAsync(&stream_found, d_num_found_streams[i], sizeof(int), cudaMemcpyDeviceToHost, streams[i]);
+        h_num_found += stream_found;
+    }
+    
+    // Synchronize all streams to ensure memory copy is complete
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaStreamSynchronize(streams[i]);
+    }
+    
+    printf("Number of found passwords: %d\n", h_num_found);
+    
     // // Allocate memory on the host to store found passwords
     // FoundPassword* h_found_passwords = new FoundPassword[MAX_FOUND];
-
-    // // Variable to store the number of found passwords
-    // int h_num_found;
-
-    // // Copy the number of found passwords from device to host
-    // cudaMemcpy(&h_num_found, d_num_found, sizeof(int), cudaMemcpyDeviceToHost);
 
     // // Copy the found passwords from device to host
     // cudaMemcpy(h_found_passwords, d_found_passwords, h_num_found * sizeof(FoundPassword), cudaMemcpyDeviceToHost);
@@ -684,22 +690,17 @@ int main() {
     // //     printf(":%s\n", fp.password);
     // // }
 
-    // // Print the total number of found passwords
-    // printf("\nFound %d passwords\n", h_num_found);
-
-
-
-    // printf("\nPerformance Metrics:\n");
-    // printf("GPU Time: %.2f ms\n", gpu_time_ms);
-    // // printf("Performance: %.2f GH/s\n", total_passwords / elapsed_seconds.count() / 1e9);
-
-
-    // cudaFree(d_found_passwords);
-    // cudaFree(d_num_found);
-    // cudaFree(d_target_salts);
-    // cudaFree(d_target_hashes);
-    // cudaFree(d_hash_data);
-    // cudaFree(d_sortedHashes);
-
+    // Cleanup streams and memory
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaFree(d_target_salts_streams[i]);
+        cudaFree(d_target_hashes_streams[i]);
+        cudaFree(d_hash_data_streams[i]);
+        cudaFree(d_sorted_hashes_streams[i]);
+        cudaFree(d_num_found_streams[i]);
+        cudaFree(d_found_passwords_streams[i]);
+        
+        // Destroy the stream
+        cudaStreamDestroy(streams[i]);
+    }
     return 0;
 }
