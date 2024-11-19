@@ -1,83 +1,134 @@
 #include <iostream>
-#include <immintrin.h> // For AVX
-#include <cuda_runtime.h>
+#include <cstring>
+#include <chrono>
+#include <immintrin.h> // For AVX and AVX2 intrinsics
 
-// CUDA kernel for vector addition
-__global__ void add_arrays_cuda(const float* a, const float* b, float* result, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        result[idx] = a[idx] + b[idx];
-    }
+#define SHA256_DIGEST_LENGTH 32
+#define SHA256_BLOCK_SIZE 64
+
+const uint32_t k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19b4b4b5, 0x1e376c4f, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa11, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+void sha256_init(uint32_t* state) {
+    state[0] = 0x6a09e667;
+    state[1] = 0xbb67ae85;
+    state[2] = 0x3c6ef372;
+    state[3] = 0xa54ff53a;
+    state[4] = 0x510e527f;
+    state[5] = 0x9b05688c;
+    state[6] = 0x1f83d9ab;
+    state[7] = 0x5be0cd19;
 }
 
-// Host function using AVX
-void add_arrays_avx(const float* a, const float* b, float* result, int size) {
-    int i;
-    // Process 8 floats at a time using AVX
-    for (i = 0; i <= size - 8; i += 8) {
-        __m256 vec_a = _mm256_loadu_ps(&a[i]);
-        __m256 vec_b = _mm256_loadu_ps(&b[i]);
-        __m256 vec_result = _mm256_add_ps(vec_a, vec_b);
-        _mm256_storeu_ps(&result[i], vec_result);
+void sha256_transform(uint32_t* state, const uint8_t* data) {
+    uint32_t w[64];
+    for (int i = 0; i < 16; ++i) {
+        w[i] = (data[i * 4] << 24) | (data[i * 4 + 1] << 16) | 
+               (data[i * 4 + 2] << 8) | (data[i * 4 + 3]);
     }
 
-    // Handle any remaining elements
-    for (; i < size; i++) {
-        result[i] = a[i] + b[i];
+    for (int i = 16; i < 64; ++i) {
+        w[i] = w[i - 16] + (w[i - 7]) +
+               ((w[i - 15] >> 7) | (w[i - 15] << (32 - 7))) +
+               ((w[i - 2] >> 17) | (w[i - 2] << (32 - 17)));
+    }
+
+    uint32_t a = state[0];
+    uint32_t b = state[1];
+    uint32_t c = state[2];
+    uint32_t d = state[3];
+    uint32_t e = state[4];
+    uint32_t f = state[5];
+    uint32_t g = state[6];
+    uint32_t h = state[7];
+
+    for (int i = 0; i < 64; ++i) {
+        uint32_t t1 = h + ((e >> 6) | (e << (32 - 6))) + 
+                        ((e & f) ^ (~e & g)) + k[i] + w[i];
+        uint32_t t2 = ((a >> 2) | (a << (32 - 2))) + 
+                       ((a & b) ^ (a & c) ^ (b & c));
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+    state[5] += f;
+    state[6] += g;
+    state[7] += h;
+}
+
+void sha256_final(uint32_t* state, const uint8_t* data, size_t length, uint8_t* hash) {
+    uint8_t buffer[SHA256_BLOCK_SIZE] = {0};
+    size_t i = 0;
+
+    for (; i + SHA256_BLOCK_SIZE <= length; i += SHA256_BLOCK_SIZE) {
+        sha256_transform(state, data + i);
+    }
+
+    memcpy(buffer, data + i, length - i);
+    buffer[length - i] = 0x80;
+
+    if (length % SHA256_BLOCK_SIZE > SHA256_BLOCK_SIZE - 9) {
+        sha256_transform(state, buffer);
+        memset(buffer, 0, SHA256_BLOCK_SIZE);
+    }
+
+    uint64_t bit_length = length * 8;
+    memcpy(buffer + SHA256_BLOCK_SIZE - 8, &bit_length, 8);
+    sha256_transform(state, buffer);
+
+    for (i = 0; i < 8; ++i) {
+        hash[i * 4] = (state[i] >> 24) & 0xff;
+        hash[i * 4 + 1] = (state[i] >> 16) & 0xff;
+        hash[i * 4 + 2] = (state[i] >> 8) & 0xff;
+        hash[i * 4 + 3] = state[i] & 0xff;
     }
 }
 
 int main() {
-    const int size = 16; // Example size
-    const int bytes = size * sizeof(float);
+    const size_t num_hashes = 1UL << 24; // 2^32 hashes
+    uint8_t hash[SHA256_DIGEST_LENGTH];
+    uint32_t state[8];
 
-    // Host arrays
-    float h_a[size] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f,
-                       9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f, 16.0f};
-    float h_b[size] = {16.0f, 15.0f, 14.0f, 13.0f, 12.0f, 11.0f, 10.0f, 9.0f,
-                       8.0f, 7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f};
-    float h_result[size] = {0};
+    sha256_init(state);
 
-    // Device arrays
-    float *d_a, *d_b, *d_result;
+    auto start = std::chrono::high_resolution_clock::now();
 
-    // Allocate device memory
-    cudaMalloc((void**)&d_a, bytes);
-    cudaMalloc((void**)&d_b, bytes);
-    cudaMalloc((void**)&d_result, bytes);
-
-    // Copy data from host to device
-    cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice);
-
-    // Launch CUDA kernel
-    int threadsPerBlock = 16;
-    int blocksPerGrid = (size + threadsPerBlock - 1) / threadsPerBlock;
-    add_arrays_cuda<<<blocksPerGrid, threadsPerBlock>>>(d_a, d_b, d_result, size);
-
-    // Copy result back to host
-    cudaMemcpy(h_result, d_result, bytes, cudaMemcpyDeviceToHost);
-
-    // Print CUDA results
-    std::cout << "CUDA Results:" << std::endl;
-    for (int i = 0; i < size; i++) {
-        std::cout << "result[" << i << "] = " << h_result[i] << std::endl;
+    for (size_t i = 0; i < num_hashes; ++i) {
+        sha256_final(state, reinterpret_cast<const uint8_t*>(&i), sizeof(i), hash);
     }
 
-    // Use AVX for addition on the host
-    float avx_result[size] = {0};
-    add_arrays_avx(h_a, h_b, avx_result, size);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
 
-    // Print AVX results
-    std::cout << "AVX Results:" << std::endl;
-    for (int i = 0; i < size; i++) {
-        std::cout << "avx_result[" << i << "] = " << avx_result[i] << std::endl;
-    }
-
-    // Free device memory
-    cudaFree(d_a);
-    cudaFree(d_b);
-    cudaFree(d_result);
+    std::cout << "Calculated " << num_hashes << " hashes in " 
+              << elapsed.count() << " seconds." << std::endl;
 
     return 0;
 }
