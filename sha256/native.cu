@@ -1,7 +1,10 @@
 #include <iostream>
-#include <cstring>
+#include <iomanip>
+#include <sstream>
+#include <thread>
+#include <vector>
 #include <chrono>
-#include <immintrin.h> // For AVX and AVX2 intrinsics
+#include <cstring>
 
 #define SHA256_DIGEST_LENGTH 32
 #define SHA256_BLOCK_SIZE 64
@@ -22,7 +25,7 @@ const uint32_t k[64] = {
     0x19b4b4b5, 0x1e376c4f, 0x2748774c, 0x34b0bcb5,
     0x391c0cb3, 0x4ed8aa11, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 };
 
 void sha256_init(uint32_t* state) {
@@ -44,9 +47,13 @@ void sha256_transform(uint32_t* state, const uint8_t* data) {
     }
 
     for (int i = 16; i < 64; ++i) {
-        w[i] = w[i - 16] + (w[i - 7]) +
-               ((w[i - 15] >> 7) | (w[i - 15] << (32 - 7))) +
-               ((w[i - 2] >> 17) | (w[i - 2] << (32 - 17)));
+        uint32_t s0 = ((w[i-15] >> 7) | (w[i-15] << 25)) ^ 
+                      ((w[i-15] >> 18) | (w[i-15] << 14)) ^ 
+                      (w[i-15] >> 3);
+        uint32_t s1 = ((w[i-2] >> 17) | (w[i-2] << 15)) ^ 
+                      ((w[i-2] >> 19) | (w[i-2] << 13)) ^ 
+                      (w[i-2] >> 10);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
     }
 
     uint32_t a = state[0];
@@ -59,18 +66,25 @@ void sha256_transform(uint32_t* state, const uint8_t* data) {
     uint32_t h = state[7];
 
     for (int i = 0; i < 64; ++i) {
-        uint32_t t1 = h + ((e >> 6) | (e << (32 - 6))) + 
-                        ((e & f) ^ (~e & g)) + k[i] + w[i];
-        uint32_t t2 = ((a >> 2) | (a << (32 - 2))) + 
-                       ((a & b) ^ (a & c) ^ (b & c));
+        uint32_t S1 = ((e >> 6) | (e << 26)) ^ 
+                      ((e >> 11) | (e << 21)) ^ 
+                      ((e >> 25) | (e << 7));
+        uint32_t ch = (e & f) ^ (~e & g);
+        uint32_t temp1 = h + S1 + ch + k[i] + w[i];
+        uint32_t S0 = ((a >> 2) | (a << 30)) ^ 
+                      ((a >> 13) | (a << 19)) ^ 
+                      ((a >> 22) | (a << 10));
+        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2 = S0 + maj;
+
         h = g;
         g = f;
         f = e;
-        e = d + t1;
+        e = d + temp1;
         d = c;
         c = b;
         b = a;
-        a = t1 + t2;
+        a = temp1 + temp2;
     }
 
     state[0] += a;
@@ -111,24 +125,55 @@ void sha256_final(uint32_t* state, const uint8_t* data, size_t length, uint8_t* 
     }
 }
 
-int main() {
-    const size_t num_hashes = 1UL << 24; // 2^32 hashes
-    uint8_t hash[SHA256_DIGEST_LENGTH];
-    uint32_t state[8];
+std::string bytes_to_hex_string(const uint8_t* data, size_t length) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < length; ++i) {
+        ss << std::setw(2) << static_cast<int>(data[i]);
+    }
+    return ss.str();
+}
 
-    sha256_init(state);
+void hash_range(size_t start, size_t end) {
+    uint32_t state[8];
+    uint8_t hash[SHA256_DIGEST_LENGTH];
+
+    for (size_t i = start; i < end; ++i) {
+        sha256_init(state);
+        
+        // Hash the current index
+        sha256_final(state, reinterpret_cast<const uint8_t*>(&i), sizeof(i), hash);
+        
+        // Print the hash
+        // std::string hex_hash = bytes_to_hex_string(hash, SHA256_DIGEST_LENGTH);
+        // std::cout << "Index " << i << ": " << hex_hash << std::endl;
+    }
+}
+
+int main() {
+    const size_t num_hashes = 1000000; // Reduced for demonstration
+    const size_t num_threads = std::thread::hardware_concurrency();
+    std::vector<std::thread> threads;
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    for (size_t i = 0; i < num_hashes; ++i) {
-        sha256_final(state, reinterpret_cast<const uint8_t*>(&i), sizeof(i), hash);
+    // Launch threads
+    for (size_t i = 0; i < num_threads; ++i) {
+        size_t range_start = (num_hashes / num_threads) * i;
+        size_t range_end = (i == num_threads - 1) ? num_hashes : (num_hashes / num_threads) * (i + 1);
+        threads.emplace_back(hash_range, range_start, range_end);
+    }
+
+    // Join threads
+    for (auto& thread : threads) {
+        thread.join();
     }
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
 
     std::cout << "Calculated " << num_hashes << " hashes in " 
-              << elapsed.count() << " seconds." << std::endl;
+              << elapsed.count() << " seconds using " << num_threads << " threads." << std::endl;
 
     return 0;
 }
