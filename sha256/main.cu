@@ -248,7 +248,7 @@ int f(const uint8_t* data, int length) {
     for (int i = 0; i < length; ++i) {
         hash = hash * 31 + data[i];
     }
-    return hash % 199997;
+    return hash % 1999997;
 }
 
 __device__ int f2(const uint8_t* data, int length) {
@@ -256,7 +256,7 @@ __device__ int f2(const uint8_t* data, int length) {
     for (int i = 0; i < length; ++i) {
         hash = hash * 31 + data[i];
     }
-    return hash % 199997;
+    return hash % 1999997;
 }
 
 // Node structure for AVL Tree
@@ -386,9 +386,24 @@ __device__ int compareHashes(const uint8_t* hash1, const uint8_t* hash2) {
     return 0;
 }
 
-__device__ bool binarySearchHashes(const uint8_t* sortedHashes, int num_hashes, const uint8_t* targetHash) {
-    int left = 0;
-    int right = num_hashes - 1;
+__device__ bool binarySearchHashes(
+    const uint8_t* sortedHashes, 
+    int num_hashes, 
+    const uint8_t* targetHash, 
+    const int* shared_first_letter_index
+) {
+    // Extract the first 4 bits of the target hash
+    uint8_t firstLetter = targetHash[0] >> 4;
+    
+    // Use the first letter index to potentially reduce search space
+    int start_index = (firstLetter < 16) ? shared_first_letter_index[firstLetter] : 0;
+    int end_index = (firstLetter + 1 < 16 && shared_first_letter_index[firstLetter + 1] != -1) 
+                    ? shared_first_letter_index[firstLetter + 1] 
+                    : num_hashes;
+    // int start_index = 0;
+    // int end_index = num_hashes;
+    int left = start_index;
+    int right = end_index - 1;
 
     while (left <= right) {
         int mid = left + (right - left) / 2;
@@ -407,21 +422,29 @@ __device__ bool binarySearchHashes(const uint8_t* sortedHashes, int num_hashes, 
     return false; // No match found
 }
 
+
 __global__ void find_passwords_optimized_multi(
     const uint8_t* __restrict__ target_salts,
     const uint8_t* __restrict__ target_hashes,
     const uint8_t* __restrict__ sortedHashes,
     int* __restrict__ num_found,
     const int* __restrict__ d_hash_data,
+    const int* __restrict__ d_first_letter_index, // New parameter
     int salt_index  // New parameter to specify which salt this kernel handles
 ) {
     __shared__ uint8_t shared_salt[8];
+    __shared__ int shared_first_letter_index[16];
     uint8_t hash[32];
     uint8_t combined[14];
 
     // Load the salt into shared memory
     if (threadIdx.x < 8) {
         shared_salt[threadIdx.x] = target_salts[threadIdx.x];
+    }
+
+    // Load first letter indices into shared memory
+    if (threadIdx.x < 16) {
+        shared_first_letter_index[threadIdx.x] = d_first_letter_index[threadIdx.x];
     }
 
     __syncthreads();
@@ -445,11 +468,11 @@ __global__ void find_passwords_optimized_multi(
         combined[13] = shared_salt[7];
         
         sha256(combined, hash);
-        int index = f2(hash, 6);
+        int index = f2(hash, 4);
 
         // Use linear probing to resolve collisions
         while (d_hash_data[index] != -1) {
-            if (binarySearchHashes(sortedHashes, 100, hash)) {
+            if (binarySearchHashes(sortedHashes, 100, hash, shared_first_letter_index)) {
                 atomicAdd(num_found, 1);
                 break;
             }
@@ -537,7 +560,23 @@ int main() {
     // Create sorted hashes for each salt
     auto saltSpecificSortedHashes = createSaltSpecificSortedHashes(all_target_hashes);
 
-    const int HASH_TABLE_SIZE = 199997; // Adjusted to accommodate 1000 target hashes
+    // After creating saltSpecificSortedHashes
+    std::vector<std::vector<int>> firstLetterIndex(10, std::vector<int>(16, -1));
+
+    for (int salt_index = 0; salt_index < 10; salt_index++) {
+        for (int i = 0; i < saltSpecificSortedHashes[salt_index].size(); i++) {
+            // Get the first hex character (first 4 bits)
+            uint8_t firstLetter = saltSpecificSortedHashes[salt_index][i][0] >> 4;
+            
+            // Set the index if it's not already set
+            if (firstLetterIndex[salt_index][firstLetter] == -1) {
+                firstLetterIndex[salt_index][firstLetter] = i;
+            }
+        }
+    }
+
+
+    const int HASH_TABLE_SIZE = 1999997; // Adjusted to accommodate 1000 target hashes
 
     std::vector<std::vector<int>> hash_data_streams(NUM_STREAMS);
     #pragma omp parallel for
@@ -547,7 +586,7 @@ int main() {
     
         for (int hash_index = 0; hash_index < 100; hash_index++) {
             // Calculate the hash value for the current hash
-            int index = f(all_target_hashes[salt_index][hash_index], 6);
+            int index = f(all_target_hashes[salt_index][hash_index], 4);
     
             // Use linear probing to resolve collisions
             while (hash_data_streams[salt_index][index] != -1) {
@@ -565,6 +604,7 @@ int main() {
     int* d_hash_data_streams[NUM_STREAMS];
     uint8_t* d_sorted_hashes_streams[NUM_STREAMS];
     int* d_num_found_streams[NUM_STREAMS];
+    int* d_first_letter_index_streams[NUM_STREAMS];
     FoundPassword* d_found_passwords_streams[NUM_STREAMS];
 
     for (int i = 0; i < NUM_STREAMS; ++i) {
@@ -574,6 +614,7 @@ int main() {
         cudaMalloc(&d_sorted_hashes_streams[i], 100 * 32 * sizeof(uint8_t));
         cudaMalloc(&d_num_found_streams[i], sizeof(int));
         cudaMalloc(&d_found_passwords_streams[i], 100 * sizeof(FoundPassword));
+        cudaMalloc(&d_first_letter_index_streams[i], 16 * sizeof(int));
 
         // Copy specific salt for this stream
         cudaMemcpyAsync(d_target_salts_streams[i], 
@@ -604,6 +645,15 @@ int main() {
                             streams[i]);
         }
 
+        // Copy first letter indices to device
+        cudaMemcpyAsync(
+            d_first_letter_index_streams[i], 
+            firstLetterIndex[i].data(), 
+            16 * sizeof(int), 
+            cudaMemcpyHostToDevice, 
+            streams[i]
+        );
+
         // Initialize found passwords counter to zero
         cudaMemsetAsync(d_num_found_streams[i], 0, sizeof(int), streams[i]);
     }
@@ -632,13 +682,14 @@ int main() {
 
     // Launch kernels on different streams
     #pragma unroll
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 10; ++i) {
         find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
             d_target_salts_streams[i],       // Device pointer to the specific salt
             d_target_hashes_streams[i],      // Device pointer to the specific hashes
             d_sorted_hashes_streams[i],      // Device pointer to the specific sorted hashes
             d_num_found_streams[i],          // Device pointer to store the number of found passwords
             d_hash_data_streams[i],          // Device pointer to the specific hash data
+            d_first_letter_index_streams[i], // Device pointer to first letter indices
             i                                // Salt index
         );
     }
@@ -703,6 +754,7 @@ int main() {
         cudaFree(d_sorted_hashes_streams[i]);
         cudaFree(d_num_found_streams[i]);
         cudaFree(d_found_passwords_streams[i]);
+        cudaFree(d_first_letter_index_streams[i]);
         
         // Destroy the stream
         cudaStreamDestroy(streams[i]);
