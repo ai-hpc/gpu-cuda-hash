@@ -45,12 +45,6 @@ __constant__ uint32_t K[64] = {
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
-struct FoundPassword {
-    char password[7];
-    uint8_t hash[32];
-    uint8_t salt[8];
-};
-
 __device__ __forceinline__ uint32_t rotr(uint32_t x, uint32_t n) {
     return (x >> n) | (x << (32 - n));
 }
@@ -85,7 +79,7 @@ __device__ void sha256(const uint8_t* __restrict__ data, uint8_t* __restrict__ h
     W[15] = 112; // Message length (64 bytes * 8 bits/byte = 512 bits)
 
     // Message schedule expansion (unrolled with reduced dependencies)
-    #pragma unroll
+    #pragma unroll 48
     for (int i = 16; i < 64; i += 4) {
         uint32_t s0_1 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ (W[i - 15] >> 3);
         uint32_t s1_1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ (W[i - 2] >> 10);
@@ -184,55 +178,46 @@ __device__ void sha256(const uint8_t* __restrict__ data, uint8_t* __restrict__ h
     f += 0x9b05688c;
     g += 0x1f83d9ab;
     h += 0x5be0cd19;
-    // Vectorized hash output generation using CUDA intrinsic
-    *(uint32_t*)(hash)     = __byte_perm(a, 0, 0x0123);
-    *(uint32_t*)(hash + 4) = __byte_perm(b, 0, 0x0123);
-    *(uint32_t*)(hash + 8) = __byte_perm(c, 0, 0x0123);
-    *(uint32_t*)(hash + 12) = __byte_perm(d, 0, 0x0123);
-    *(uint32_t*)(hash + 16) = __byte_perm(e, 0, 0x0123);
-    *(uint32_t*)(hash + 20) = __byte_perm(f, 0, 0x0123);
-    *(uint32_t*)(hash + 24) = __byte_perm(g, 0, 0x0123);
-    *(uint32_t*)(hash + 28) = __byte_perm(h, 0, 0x0123);
-    // // Produce the final hash value (big-endian) without using a loop
-    // hash[0] = a >> 24;
-    // hash[1] = a >> 16;
-    // hash[2] = a >> 8;
-    // hash[3] = a;
+    
+    hash[0] = a >> 24;
+    hash[1] = a >> 16;
+    hash[2] = a >> 8;
+    hash[3] = a;
 
-    // hash[4] = b >> 24;
-    // hash[5] = b >> 16;
-    // hash[6] = b >> 8;
-    // hash[7] = b;
+    hash[4] = b >> 24;
+    hash[5] = b >> 16;
+    hash[6] = b >> 8;
+    hash[7] = b;
 
-    // hash[8] = c >> 24;
-    // hash[9] = c >> 16;
-    // hash[10] = c >> 8;
-    // hash[11] = c;
+    hash[8] = c >> 24;
+    hash[9] = c >> 16;
+    hash[10] = c >> 8;
+    hash[11] = c;
 
-    // hash[12] = d >> 24;
-    // hash[13] = d >> 16;
-    // hash[14] = d >> 8;
-    // hash[15] = d;
+    hash[12] = d >> 24;
+    hash[13] = d >> 16;
+    hash[14] = d >> 8;
+    hash[15] = d;
 
-    // hash[16] = e >> 24;
-    // hash[17] = e >> 16;
-    // hash[18] = e >> 8;
-    // hash[19] = e;
+    hash[16] = e >> 24;
+    hash[17] = e >> 16;
+    hash[18] = e >> 8;
+    hash[19] = e;
 
-    // hash[20] = f >> 24;
-    // hash[21] = f >> 16;
-    // hash[22] = f >> 8;
-    // hash[23] = f;
+    hash[20] = f >> 24;
+    hash[21] = f >> 16;
+    hash[22] = f >> 8;
+    hash[23] = f;
 
-    // hash[24] = g >> 24;
-    // hash[25] = g >> 16;
-    // hash[26] = g >> 8;
-    // hash[27] = g;
+    hash[24] = g >> 24;
+    hash[25] = g >> 16;
+    hash[26] = g >> 8;
+    hash[27] = g;
 
-    // hash[28] = h >> 24;
-    // hash[29] = h >> 16;
-    // hash[30] = h >> 8;
-    // hash[31] = h;
+    hash[28] = h >> 24;
+    hash[29] = h >> 16;
+    hash[30] = h >> 8;
+    hash[31] = h;
 }
 
 
@@ -248,7 +233,7 @@ int f(const uint8_t* data, int length) {
     for (int i = 0; i < length; ++i) {
         hash = hash * 31 + data[i];
     }
-    return hash % 1999997;
+    return hash % 799997;
 }
 
 __device__ int f2(const uint8_t* data, int length) {
@@ -256,7 +241,7 @@ __device__ int f2(const uint8_t* data, int length) {
     for (int i = 0; i < length; ++i) {
         hash = hash * 31 + data[i];
     }
-    return hash % 1999997;
+    return hash % 799997;
 }
 
 // Node structure for AVL Tree
@@ -523,6 +508,11 @@ std::vector<std::vector<std::vector<uint8_t>>> createSaltSpecificSortedHashes(ui
     return saltSpecificSortedHashes;
 }
 
+struct FoundPassword {
+    char password[7];
+    uint8_t hash[32];
+    uint8_t salt[8];
+};
 
 int main() {
     uint8_t all_target_hashes[10][100][32]; // 10 salts, each with 100 hashes
@@ -576,7 +566,7 @@ int main() {
     }
 
 
-    const int HASH_TABLE_SIZE = 1999997; // Adjusted to accommodate 1000 target hashes
+    const int HASH_TABLE_SIZE = 799997; // Adjusted to accommodate 1000 target hashes
 
     std::vector<std::vector<int>> hash_data_streams(NUM_STREAMS);
     #pragma omp parallel for
@@ -659,7 +649,7 @@ int main() {
     }
 
     // Determine the number of threads per block
-    int blockSize = 512; // Choose a block size that is a multiple of the warp size
+    int blockSize = 1024; // Choose a block size that is a multiple of the warp size
 
     // Calculate the total number of threads needed
     uint64_t totalThreads = total_passwords;
@@ -668,7 +658,7 @@ int main() {
     int numBlocks = (totalThreads + blockSize - 1) / blockSize;
 
     // Ensure the number of blocks does not exceed the maximum allowed by the device
-    numBlocks = 3072;
+    numBlocks = 12288;
 
     // printf("Kernel configuration:\n");
     // printf("- Block size: %d\n", blockSize);
@@ -682,7 +672,7 @@ int main() {
 
     // Launch kernels on different streams
     #pragma unroll
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 1; ++i) {
         find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
             d_target_salts_streams[i],       // Device pointer to the specific salt
             d_target_hashes_streams[i],      // Device pointer to the specific hashes
