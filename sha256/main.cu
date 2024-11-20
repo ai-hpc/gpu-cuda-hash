@@ -10,7 +10,6 @@
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <omp.h>
-#include <immintrin.h>
 
 #define MAX_FOUND 1000
 #define NUM_STREAMS 10  // One stream per salt
@@ -52,24 +51,19 @@ struct FoundPassword {
     uint8_t salt[8];
 };
 
-// Right rotate function
 __device__ __forceinline__ uint32_t rotr(uint32_t x, uint32_t n) {
-    uint32_t result;
-    asm("shf.r.wrap.b32 %0, %1, %1, %2;" : "=r"(result) : "r"(x), "r"(n));
-    return result;
+    return (x >> n) | (x << (32 - n));
 }
 
-// SHA-256 hash function
 __device__ void sha256(const uint8_t* __restrict__ data, uint8_t* __restrict__ hash) {
-    // Initial hash values
-    uint32_t a = 0x6a09e667;
-    uint32_t b = 0xbb67ae85;
-    uint32_t c = 0x3c6ef372;
-    uint32_t d = 0xa54ff53a;
-    uint32_t e = 0x510e527f;
-    uint32_t f = 0x9b05688c;
-    uint32_t g = 0x1f83d9ab;
-    uint32_t h = 0x5be0cd19;
+    register uint32_t a = 0x6a09e667;
+    register uint32_t b = 0xbb67ae85;
+    register uint32_t c = 0x3c6ef372;
+    register uint32_t d = 0xa54ff53a;
+    register uint32_t e = 0x510e527f;
+    register uint32_t f = 0x9b05688c;
+    register uint32_t g = 0x1f83d9ab;
+    register uint32_t h = 0x5be0cd19;
 
     __align__(4) uint32_t W[64];
    // Load the first 16 words (unrolled for potential speedup)
@@ -190,56 +184,55 @@ __device__ void sha256(const uint8_t* __restrict__ data, uint8_t* __restrict__ h
     f += 0x9b05688c;
     g += 0x1f83d9ab;
     h += 0x5be0cd19;
+    // Vectorized hash output generation using CUDA intrinsic
+    *(uint32_t*)(hash)     = __byte_perm(a, 0, 0x0123);
+    *(uint32_t*)(hash + 4) = __byte_perm(b, 0, 0x0123);
+    *(uint32_t*)(hash + 8) = __byte_perm(c, 0, 0x0123);
+    *(uint32_t*)(hash + 12) = __byte_perm(d, 0, 0x0123);
+    *(uint32_t*)(hash + 16) = __byte_perm(e, 0, 0x0123);
+    *(uint32_t*)(hash + 20) = __byte_perm(f, 0, 0x0123);
+    *(uint32_t*)(hash + 24) = __byte_perm(g, 0, 0x0123);
+    *(uint32_t*)(hash + 28) = __byte_perm(h, 0, 0x0123);
+    // // Produce the final hash value (big-endian) without using a loop
+    // hash[0] = a >> 24;
+    // hash[1] = a >> 16;
+    // hash[2] = a >> 8;
+    // hash[3] = a;
 
-    // Produce the final hash value (big-endian) without using a loop
-    hash[0] = a >> 24;
-    hash[1] = a >> 16;
-    hash[2] = a >> 8;
-    hash[3] = a;
+    // hash[4] = b >> 24;
+    // hash[5] = b >> 16;
+    // hash[6] = b >> 8;
+    // hash[7] = b;
 
-    hash[4] = b >> 24;
-    hash[5] = b >> 16;
-    hash[6] = b >> 8;
-    hash[7] = b;
+    // hash[8] = c >> 24;
+    // hash[9] = c >> 16;
+    // hash[10] = c >> 8;
+    // hash[11] = c;
 
-    hash[8] = c >> 24;
-    hash[9] = c >> 16;
-    hash[10] = c >> 8;
-    hash[11] = c;
+    // hash[12] = d >> 24;
+    // hash[13] = d >> 16;
+    // hash[14] = d >> 8;
+    // hash[15] = d;
 
-    hash[12] = d >> 24;
-    hash[13] = d >> 16;
-    hash[14] = d >> 8;
-    hash[15] = d;
+    // hash[16] = e >> 24;
+    // hash[17] = e >> 16;
+    // hash[18] = e >> 8;
+    // hash[19] = e;
 
-    hash[16] = e >> 24;
-    hash[17] = e >> 16;
-    hash[18] = e >> 8;
-    hash[19] = e;
+    // hash[20] = f >> 24;
+    // hash[21] = f >> 16;
+    // hash[22] = f >> 8;
+    // hash[23] = f;
 
-    hash[20] = f >> 24;
-    hash[21] = f >> 16;
-    hash[22] = f >> 8;
-    hash[23] = f;
+    // hash[24] = g >> 24;
+    // hash[25] = g >> 16;
+    // hash[26] = g >> 8;
+    // hash[27] = g;
 
-    hash[24] = g >> 24;
-    hash[25] = g >> 16;
-    hash[26] = g >> 8;
-    hash[27] = g;
-
-    hash[28] = h >> 24;
-    hash[29] = h >> 16;
-    hash[30] = h >> 8;
-    hash[31] = h;
-}
-
-__device__ __host__ bool fastHashCompare(const uint8_t* hash1, const uint8_t* hash2) {
-    // Use SIMD for faster comparison
-    __m256i* vec1 = (__m256i*)hash1;
-    __m256i* vec2 = (__m256i*)hash2;
-    
-    __m256i cmp = _mm256_cmpeq_epi8(*vec1, *vec2);
-    return _mm256_movemask_epi8(cmp) == 0xFFFFFFFF;
+    // hash[28] = h >> 24;
+    // hash[29] = h >> 16;
+    // hash[30] = h >> 8;
+    // hash[31] = h;
 }
 
 
@@ -255,7 +248,7 @@ int f(const uint8_t* data, int length) {
     for (int i = 0; i < length; ++i) {
         hash = hash * 31 + data[i];
     }
-    return hash % 1999997;
+    return hash % 199997;
 }
 
 __device__ int f2(const uint8_t* data, int length) {
@@ -263,7 +256,7 @@ __device__ int f2(const uint8_t* data, int length) {
     for (int i = 0; i < length; ++i) {
         hash = hash * 31 + data[i];
     }
-    return hash % 1999997;
+    return hash % 199997;
 }
 
 // Node structure for AVL Tree
@@ -544,7 +537,7 @@ int main() {
     // Create sorted hashes for each salt
     auto saltSpecificSortedHashes = createSaltSpecificSortedHashes(all_target_hashes);
 
-    const int HASH_TABLE_SIZE = 1999997; // Adjusted to accommodate 1000 target hashes
+    const int HASH_TABLE_SIZE = 199997; // Adjusted to accommodate 1000 target hashes
 
     std::vector<std::vector<int>> hash_data_streams(NUM_STREAMS);
     #pragma omp parallel for
@@ -639,7 +632,7 @@ int main() {
 
     // Launch kernels on different streams
     #pragma unroll
-    for (int i = 0; i < NUM_STREAMS; ++i) {
+    for (int i = 0; i < 2; ++i) {
         find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
             d_target_salts_streams[i],       // Device pointer to the specific salt
             d_target_hashes_streams[i],      // Device pointer to the specific hashes
