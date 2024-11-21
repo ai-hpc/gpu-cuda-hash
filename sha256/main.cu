@@ -417,24 +417,15 @@ __global__ void find_passwords_optimized_multi(
     const int* __restrict__ d_first_letter_index, // New parameter
     int salt_index  // New parameter to specify which salt this kernel handles
 ) {
-    // __shared__ uint8_t shared_salt[8];
     // Align hash array to improve memory access patterns
-    __align__(32) uint8_t hash[32];
-    __align__(16) uint8_t combined[14];
-
-    // // Load the salt into shared memory
-    // if (threadIdx.x < 8) {
-    //     shared_salt[threadIdx.x] = target_salts[threadIdx.x];
-    // }
-
-    // __syncthreads();
 
     // Calculate thread position for parallel password generation
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint64_t stride = blockDim.x * gridDim.x;
     // Process multiple passwords per thread
-    for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += stride) {
+    for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += 1572864) {
         uint64_t idx = password_idx;
+
+        uint8_t combined[14] __attribute__((aligned(16)));
 
         #pragma unroll
         for (int i = 0; i < 6; ++i) {
@@ -446,7 +437,7 @@ __global__ void find_passwords_optimized_multi(
         // Use shared memory for salt
         combined[12] = target_salts[6];
         combined[13] = target_salts[7];
-        
+        uint8_t hash[32] __attribute__((aligned(32)));
         sha256(combined, hash);
         int index = f2(hash, 4);
 
@@ -644,7 +635,7 @@ int main() {
     }
 
     // Determine the number of threads per block
-    int blockSize = 1024; // Choose a block size that is a multiple of the warp size
+    int blockSize = 512; // Choose a block size that is a multiple of the warp size
 
     // Calculate the total number of threads needed
     uint64_t totalThreads = total_passwords;
@@ -667,7 +658,7 @@ int main() {
 
     // Launch kernels on different streams
     #pragma unroll
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 2; ++i) {
         find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
             d_target_salts_streams[i],       // Device pointer to the specific salt
             d_target_hashes_streams[i],      // Device pointer to the specific hashes
