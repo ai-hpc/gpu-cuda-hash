@@ -417,22 +417,17 @@ __global__ void find_passwords_optimized_multi(
     const int* __restrict__ d_first_letter_index, // New parameter
     int salt_index  // New parameter to specify which salt this kernel handles
 ) {
-    __shared__ uint8_t shared_salt[8];
-    __shared__ int shared_first_letter_index[16];
-    uint8_t hash[32];
-    uint8_t combined[14];
+    // __shared__ uint8_t shared_salt[8];
+    // Align hash array to improve memory access patterns
+    __align__(32) uint8_t hash[32];
+    __align__(16) uint8_t combined[14];
 
-    // Load the salt into shared memory
-    if (threadIdx.x < 8) {
-        shared_salt[threadIdx.x] = target_salts[threadIdx.x];
-    }
+    // // Load the salt into shared memory
+    // if (threadIdx.x < 8) {
+    //     shared_salt[threadIdx.x] = target_salts[threadIdx.x];
+    // }
 
-    // Load first letter indices into shared memory
-    if (threadIdx.x < 16) {
-        shared_first_letter_index[threadIdx.x] = d_first_letter_index[threadIdx.x];
-    }
-
-    __syncthreads();
+    // __syncthreads();
 
     // Calculate thread position for parallel password generation
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -444,20 +439,20 @@ __global__ void find_passwords_optimized_multi(
         #pragma unroll
         for (int i = 0; i < 6; ++i) {
             combined[i] = charset[idx % 62];
-            combined[6 + i] = shared_salt[i];
+            combined[6 + i] = target_salts[i];
             idx = static_cast<uint64_t>(idx * reciprocal); // Approximate division by 62
         }       
         
         // Use shared memory for salt
-        combined[12] = shared_salt[6];
-        combined[13] = shared_salt[7];
+        combined[12] = target_salts[6];
+        combined[13] = target_salts[7];
         
         sha256(combined, hash);
         int index = f2(hash, 4);
 
         // Use linear probing to resolve collisions
         while (d_hash_data[index] != -1) {
-            if (binarySearchHashes(sortedHashes, 100, hash, shared_first_letter_index)) {
+            if (binarySearchHashes(sortedHashes, 100, hash, d_first_letter_index)) {
                 atomicAdd(num_found, 1);
                 break;
             }
@@ -658,7 +653,7 @@ int main() {
     int numBlocks = (totalThreads + blockSize - 1) / blockSize;
 
     // Ensure the number of blocks does not exceed the maximum allowed by the device
-    numBlocks = 12288;
+    numBlocks = 3072;//12288
 
     // printf("Kernel configuration:\n");
     // printf("- Block size: %d\n", blockSize);
@@ -672,7 +667,7 @@ int main() {
 
     // Launch kernels on different streams
     #pragma unroll
-    for (int i = 0; i < 1; ++i) {
+    for (int i = 0; i < 10; ++i) {
         find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
             d_target_salts_streams[i],       // Device pointer to the specific salt
             d_target_hashes_streams[i],      // Device pointer to the specific hashes
