@@ -231,7 +231,7 @@ void hexToBytes(const char* hex, uint8_t* bytes) {
 int f(const uint8_t* data, int length) {
     unsigned int hash = 0;
     for (int i = 0; i < length; ++i) {
-        hash = hash * 31 + data[i];
+        hash = (hash << 5) - hash + data[i];
     }
     return hash % 799997;
 }
@@ -239,7 +239,7 @@ int f(const uint8_t* data, int length) {
 __device__ int f2(const uint8_t* data, int length) {
     unsigned int hash = 0;
     for (int i = 0; i < length; ++i) {
-        hash = hash * 31 + data[i];
+        hash = (hash << 5) - hash + data[i];
     }
     return hash % 799997;
 }
@@ -391,7 +391,7 @@ __device__ bool binarySearchHashes(
     int right = end_index - 1;
 
     while (left <= right) {
-        int mid = left + (right - left) / 2;
+        int mid = left + ((right - left) >> 1);
 
         const uint8_t* midHash = &sortedHashes[mid * 32];
         int cmp = compareHashes(targetHash, midHash);
@@ -407,12 +407,19 @@ __device__ bool binarySearchHashes(
     return false; // No match found
 }
 
+struct FoundPassword {
+    char password[7];
+    uint8_t hash[32];
+    uint8_t salt[8];
+};
+
 
 __global__ void find_passwords_optimized_multi(
     const uint8_t* __restrict__ target_salts,
     const uint8_t* __restrict__ target_hashes,
     const uint8_t* __restrict__ sortedHashes,
     int* __restrict__ num_found,
+    FoundPassword* __restrict__ found_passwords,
     const int* __restrict__ d_hash_data,
     const int* __restrict__ d_first_letter_index, // New parameter
     int salt_index  // New parameter to specify which salt this kernel handles
@@ -453,24 +460,6 @@ __global__ void find_passwords_optimized_multi(
 }
 
 
-
-
-void printHash(const uint8_t* hash) {
-    for (int i = 0; i < 32; ++i) {
-        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
-    }
-    std::cout << std::dec << std::endl; // Switch back to decimal
-}
-
-bool hashExistsInSorted(const uint8_t* hash, const std::vector<std::vector<uint8_t>>& sortedHashes) {
-    for (const auto& sortedHash : sortedHashes) {
-        if (memcmp(hash, sortedHash.data(), 32) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Function to create sorted hashes for each salt
 std::vector<std::vector<std::vector<uint8_t>>> createSaltSpecificSortedHashes(uint8_t all_target_hashes[10][100][32]) {
     std::vector<std::vector<std::vector<uint8_t>>> saltSpecificSortedHashes(10);
@@ -494,11 +483,6 @@ std::vector<std::vector<std::vector<uint8_t>>> createSaltSpecificSortedHashes(ui
     return saltSpecificSortedHashes;
 }
 
-struct FoundPassword {
-    char password[7];
-    uint8_t hash[32];
-    uint8_t salt[8];
-};
 
 int main() {
     uint8_t all_target_hashes[10][100][32]; // 10 salts, each with 100 hashes
@@ -644,7 +628,7 @@ int main() {
     int numBlocks = (totalThreads + blockSize - 1) / blockSize;
 
     // Ensure the number of blocks does not exceed the maximum allowed by the device
-    numBlocks = 3072;//12288
+    numBlocks = 3072;
 
     // printf("Kernel configuration:\n");
     // printf("- Block size: %d\n", blockSize);
@@ -658,12 +642,13 @@ int main() {
 
     // Launch kernels on different streams
     #pragma unroll
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 10; ++i) {
         find_passwords_optimized_multi<<<numBlocks, blockSize, 0, streams[i]>>>(
             d_target_salts_streams[i],       // Device pointer to the specific salt
             d_target_hashes_streams[i],      // Device pointer to the specific hashes
             d_sorted_hashes_streams[i],      // Device pointer to the specific sorted hashes
             d_num_found_streams[i],          // Device pointer to store the number of found passwords
+            d_found_passwords_streams[i],
             d_hash_data_streams[i],          // Device pointer to the specific hash data
             d_first_letter_index_streams[i], // Device pointer to first letter indices
             i                                // Salt index
