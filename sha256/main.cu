@@ -236,7 +236,7 @@ int f(const uint8_t* data, int length) {
     return hash % 799997;
 }
 
-__device__ int f2(const uint8_t* data, int length) {
+__device__ int f2(const uint8_t* __restrict__ data, int length) {
     unsigned int hash = 0;
     for (int i = 0; i < length; ++i) {
         hash = (hash << 5) - hash + data[i];
@@ -421,36 +421,43 @@ __global__ void find_passwords_optimized_multi(
     int* __restrict__ num_found,
     FoundPassword* __restrict__ found_passwords,
     const int* __restrict__ d_hash_data,
-    const int* __restrict__ d_first_letter_index, // New parameter
-    int salt_index  // New parameter to specify which salt this kernel handles
+    const int* __restrict__ d_first_letter_index,
+    int salt_index
 ) {
-    // Align hash array to improve memory access patterns
+    // Shared memory declaration
+    __shared__ uint8_t shared_salts[8];
+    __shared__ int shared_first_letter_index[16];
 
-    // Calculate thread position for parallel password generation
+    // Load data into shared memory
+    if (threadIdx.x < 8) {
+        shared_salts[threadIdx.x] = target_salts[threadIdx.x];
+    }
+    if (threadIdx.x < 16) {
+        shared_first_letter_index[threadIdx.x] = d_first_letter_index[threadIdx.x];
+    }
+    __syncthreads();
+
+    // Use shared memory in computations
     uint64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    // Process multiple passwords per thread
     for (uint64_t password_idx = tid; password_idx < total_passwords; password_idx += 1572864) {
         uint64_t idx = password_idx;
-
         uint8_t combined[14] __attribute__((aligned(16)));
 
         #pragma unroll
         for (int i = 0; i < 6; ++i) {
             combined[i] = charset[idx % 62];
-            combined[6 + i] = target_salts[i];
-            idx = static_cast<uint64_t>(idx * reciprocal); // Approximate division by 62
-        }       
+            combined[6 + i] = shared_salts[i];
+            idx = static_cast<uint64_t>(idx * reciprocal);
+        }
         
-        // Use shared memory for salt
-        combined[12] = target_salts[6];
-        combined[13] = target_salts[7];
+        combined[12] = shared_salts[6];
+        combined[13] = shared_salts[7];
         uint8_t hash[32] __attribute__((aligned(32)));
         sha256(combined, hash);
         int index = f2(hash, 4);
 
-        // Use linear probing to resolve collisions
         while (d_hash_data[index] != -1) {
-            if (binarySearchHashes(sortedHashes, 100, hash, d_first_letter_index)) {
+            if (binarySearchHashes(sortedHashes, 100, hash, shared_first_letter_index)) {
                 atomicAdd(num_found, 1);
                 break;
             }
@@ -458,6 +465,7 @@ __global__ void find_passwords_optimized_multi(
         }
     }
 }
+
 
 
 // Function to create sorted hashes for each salt
